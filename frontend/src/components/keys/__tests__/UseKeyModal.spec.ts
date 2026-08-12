@@ -21,6 +21,57 @@ vi.mock('@/composables/useClipboard', () => ({
 import UseKeyModal from '../UseKeyModal.vue'
 
 describe('UseKeyModal', () => {
+  it('defaults Claude Code to Opus 4.8 with max effort', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-claude-test',
+        baseUrl: 'https://example.com',
+        platform: 'anthropic'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    let codeBlocks = wrapper.findAll('pre code').map((code) => code.text())
+    expect(codeBlocks.join('\n')).toContain('export ANTHROPIC_MODEL="claude-opus-4-8"')
+    expect(codeBlocks.join('\n')).toContain('export CLAUDE_CODE_EFFORT_LEVEL="max"')
+
+    const settings = JSON.parse(codeBlocks.find((content) => content.includes('"$schema"'))!)
+    expect(settings.model).toBe('claude-opus-4-8')
+    expect(settings.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
+
+    const cmdTab = wrapper.findAll('button').find(
+      (button) => button.text().trim() === 'Windows CMD'
+    )
+    expect(cmdTab).toBeDefined()
+    await cmdTab!.trigger('click')
+    await nextTick()
+
+    codeBlocks = wrapper.findAll('pre code').map((code) => code.text())
+    expect(codeBlocks.join('\n')).toContain('set ANTHROPIC_MODEL=claude-opus-4-8')
+    expect(codeBlocks.join('\n')).toContain('set CLAUDE_CODE_EFFORT_LEVEL=max')
+
+    const powershellTab = wrapper.findAll('button').find(
+      (button) => button.text().trim() === 'PowerShell'
+    )
+    expect(powershellTab).toBeDefined()
+    await powershellTab!.trigger('click')
+    await nextTick()
+
+    codeBlocks = wrapper.findAll('pre code').map((code) => code.text())
+    expect(codeBlocks.join('\n')).toContain('$env:ANTHROPIC_MODEL="claude-opus-4-8"')
+    expect(codeBlocks.join('\n')).toContain('$env:CLAUDE_CODE_EFFORT_LEVEL="max"')
+  })
+
   it('renders Grok Build and OpenCode setup for Grok groups', async () => {
     const wrapper = mount(UseKeyModal, {
       props: {
@@ -287,8 +338,9 @@ describe('UseKeyModal', () => {
     const configToml = codeBlocks.find((content) => content.includes('model_provider = "OpenAI"'))
 
     expect(configToml).toBeDefined()
-    expect(configToml).toContain('model = "gpt-5.5"')
-    expect(configToml).toContain('review_model = "gpt-5.5"')
+    expect(configToml).toContain('model = "gpt-5.6-sol"')
+    expect(configToml).toContain('review_model = "gpt-5.6-sol"')
+    expect(configToml).toContain('model_reasoning_effort = "max"')
     expect(configToml).not.toContain('model = "gpt-5.4"')
     expect(configToml).not.toContain('model_context_window')
     expect(configToml).not.toContain('model_auto_compact_token_limit')
@@ -386,8 +438,9 @@ describe('UseKeyModal', () => {
     const configToml = codeBlocks.find((content) => content.includes('supports_websockets = true'))
 
     expect(configToml).toBeDefined()
-    expect(configToml).toContain('model = "gpt-5.5"')
-    expect(configToml).toContain('review_model = "gpt-5.5"')
+    expect(configToml).toContain('model = "gpt-5.6-sol"')
+    expect(configToml).toContain('review_model = "gpt-5.6-sol"')
+    expect(configToml).toContain('model_reasoning_effort = "max"')
     expect(configToml).not.toContain('model = "gpt-5.4"')
     expect(configToml).not.toContain('model_context_window')
     expect(configToml).not.toContain('model_auto_compact_token_limit')

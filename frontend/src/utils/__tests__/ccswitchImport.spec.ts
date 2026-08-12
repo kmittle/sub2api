@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLAUDE_CC_SWITCH_MODEL,
   GROK_CC_SWITCH_MODEL,
   OPENAI_CC_SWITCH_CODEX_MODEL,
   buildCcSwitchImportDeeplink
@@ -13,11 +14,15 @@ function paramsFromDeeplink(deeplink: string): URLSearchParams {
 
 describe('ccswitchImport utils', () => {
   it('defaults OpenAI CC Switch imports to the current Codex model', () => {
-    expect(OPENAI_CC_SWITCH_CODEX_MODEL).toBe('gpt-5.5')
+    expect(OPENAI_CC_SWITCH_CODEX_MODEL).toBe('gpt-5.6-sol')
   })
 
   it('defaults Grok Build imports to the current Grok model', () => {
     expect(GROK_CC_SWITCH_MODEL).toBe('grok-4.5')
+  })
+
+  it('defaults Claude imports to Opus 4.8', () => {
+    expect(CLAUDE_CC_SWITCH_MODEL).toBe('claude-opus-4-8')
   })
 
   const baseInput = {
@@ -63,19 +68,32 @@ describe('ccswitchImport utils', () => {
     expect(params.get('model')).toBe(GROK_CC_SWITCH_MODEL)
   })
 
-  it.each([
-    { platform: 'anthropic' as GroupPlatform, clientType: 'claude' as const, app: 'claude' },
-    { platform: 'gemini' as GroupPlatform, clientType: 'gemini' as const, app: 'gemini' }
-  ])('does not add a model parameter for $platform imports', ({ platform, clientType, app }) => {
+  it('adds the Claude model parameter for Anthropic and composite imports', () => {
+    for (const platform of ['anthropic', 'composite'] as GroupPlatform[]) {
+      const params = paramsFromDeeplink(
+        buildCcSwitchImportDeeplink({
+          ...baseInput,
+          platform,
+          clientType: 'claude'
+        })
+      )
+
+      expect(params.get('app')).toBe('claude')
+      expect(params.get('endpoint')).toBe(baseInput.baseUrl)
+      expect(params.get('model')).toBe(CLAUDE_CC_SWITCH_MODEL)
+    }
+  })
+
+  it('does not add a model parameter for Gemini imports', () => {
     const params = paramsFromDeeplink(
       buildCcSwitchImportDeeplink({
         ...baseInput,
-        platform,
-        clientType
+        platform: 'gemini',
+        clientType: 'gemini'
       })
     )
 
-    expect(params.get('app')).toBe(app)
+    expect(params.get('app')).toBe('gemini')
     expect(params.get('endpoint')).toBe(baseInput.baseUrl)
     expect(params.has('model')).toBe(false)
   })

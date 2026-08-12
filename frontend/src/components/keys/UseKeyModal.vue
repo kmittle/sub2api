@@ -554,6 +554,8 @@ const currentFiles = computed((): FileConfig[] => {
 })
 
 function generateAnthropicFiles(baseUrl: string, apiKey: string): FileConfig[] {
+  const defaultModel = 'claude-opus-4-8'
+  const defaultEffort = 'max'
   let path: string
   let content: string
 
@@ -562,6 +564,8 @@ function generateAnthropicFiles(baseUrl: string, apiKey: string): FileConfig[] {
       path = 'Terminal'
       content = `export ANTHROPIC_BASE_URL="${baseUrl}"
 export ANTHROPIC_AUTH_TOKEN="${apiKey}"
+export ANTHROPIC_MODEL="${defaultModel}"
+export CLAUDE_CODE_EFFORT_LEVEL="${defaultEffort}"
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CODE_ATTRIBUTION_HEADER=0`
       break
@@ -569,6 +573,8 @@ export CLAUDE_CODE_ATTRIBUTION_HEADER=0`
       path = 'Command Prompt'
       content = `set ANTHROPIC_BASE_URL=${baseUrl}
 set ANTHROPIC_AUTH_TOKEN=${apiKey}
+set ANTHROPIC_MODEL=${defaultModel}
+set CLAUDE_CODE_EFFORT_LEVEL=${defaultEffort}
 set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 set CLAUDE_CODE_ATTRIBUTION_HEADER=0`
       break
@@ -576,6 +582,8 @@ set CLAUDE_CODE_ATTRIBUTION_HEADER=0`
       path = 'PowerShell'
       content = `$env:ANTHROPIC_BASE_URL="${baseUrl}"
 $env:ANTHROPIC_AUTH_TOKEN="${apiKey}"
+$env:ANTHROPIC_MODEL="${defaultModel}"
+$env:CLAUDE_CODE_EFFORT_LEVEL="${defaultEffort}"
 $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 $env:CLAUDE_CODE_ATTRIBUTION_HEADER=0`
       break
@@ -590,9 +598,11 @@ $env:CLAUDE_CODE_ATTRIBUTION_HEADER=0`
 
   const vscodeContent = `{
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "${defaultModel}",
   "env": {
     "ANTHROPIC_BASE_URL": "${baseUrl}",
     "ANTHROPIC_AUTH_TOKEN": "${apiKey}",
+    "CLAUDE_CODE_EFFORT_LEVEL": "${defaultEffort}",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
   }
@@ -716,9 +726,9 @@ function generateOpenAIFiles(baseUrl: string, apiKey: string): FileConfig[] {
 
   // config.toml content
   const configContent = `model_provider = "OpenAI"
-model = "gpt-5.5"
-review_model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 disable_response_storage = true
 network_access = "enabled"
 windows_wsl_setup_acknowledged = true
@@ -979,9 +989,9 @@ function generateOpenAIWsFiles(baseUrl: string, apiKey: string): FileConfig[] {
 
   // config.toml content with WebSocket v2
   const configContent = `model_provider = "OpenAI"
-model = "gpt-5.5"
-review_model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 disable_response_storage = true
 network_access = "enabled"
 windows_wsl_setup_acknowledged = true

@@ -1,6 +1,7 @@
 import type { GroupPlatform } from '@/types'
 
-export const OPENAI_CC_SWITCH_CODEX_MODEL = 'gpt-5.5'
+export const OPENAI_CC_SWITCH_CODEX_MODEL = 'gpt-5.6-sol'
+export const CLAUDE_CC_SWITCH_MODEL = 'claude-opus-4-8'
 export const GROK_CC_SWITCH_MODEL = 'grok-4.5'
 
 export type CcSwitchClientType = 'claude' | 'gemini'
@@ -42,6 +43,13 @@ export function resolveCcSwitchImportConfig(
         endpoint: baseUrl,
         model: OPENAI_CC_SWITCH_CODEX_MODEL
       }
+    case 'anthropic':
+    case 'composite':
+      return {
+        app: 'claude',
+        endpoint: baseUrl,
+        model: CLAUDE_CC_SWITCH_MODEL
+      }
     case 'gemini':
       return {
         app: 'gemini',
@@ -56,7 +64,8 @@ export function resolveCcSwitchImportConfig(
     default:
       return {
         app: 'claude',
-        endpoint: baseUrl
+        endpoint: baseUrl,
+        model: CLAUDE_CC_SWITCH_MODEL
       }
   }
 }

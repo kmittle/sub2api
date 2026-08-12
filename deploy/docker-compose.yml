@@ -25,8 +25,8 @@ services:
       nofile:
         soft: 100000
         hard: 100000
-    ports:
-      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
+    expose:
+      - "8080"
     volumes:
       # Data persistence (config.yaml will be auto-generated here)
       - sub2api_data:/app/data
@@ -53,6 +53,17 @@ services:
       - RUN_MODE=${RUN_MODE:-standard}
       - UPDATE_GITHUB_TOKEN=${UPDATE_GITHUB_TOKEN:-}
       - ALIPAY_MOBILE_PRECREATE_DEEP_LINK=${ALIPAY_MOBILE_PRECREATE_DEEP_LINK:-}
+
+      # Dedicated container-only Mihomo instance. The application has no
+      # direct Internet route; upstream HTTP traffic must use this proxy.
+      - HTTP_PROXY=${SUB2API_HTTP_PROXY:-http://mihomo:17890}
+      - HTTPS_PROXY=${SUB2API_HTTPS_PROXY:-http://mihomo:17890}
+      - ALL_PROXY=${SUB2API_ALL_PROXY:-socks5h://mihomo:17890}
+      - NO_PROXY=${SUB2API_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,mihomo}
+      - http_proxy=${SUB2API_HTTP_PROXY:-http://mihomo:17890}
+      - https_proxy=${SUB2API_HTTPS_PROXY:-http://mihomo:17890}
+      - all_proxy=${SUB2API_ALL_PROXY:-socks5h://mihomo:17890}
+      - no_proxy=${SUB2API_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,mihomo}
 
       # =======================================================================
       # Database Configuration (PostgreSQL)
@@ -176,18 +187,24 @@ services:
       - GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS=${GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS:-30}
       - GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS=${GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS:-100}
     depends_on:
+      mihomo:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     networks:
-      - sub2api-network
+      - sub2api-core-network
+      - sub2api-proxy-network
+      - sub2api-ingress-network
     healthcheck:
       test:
         [
           "CMD",
           "wget",
           "-q",
+          "-Y",
+          "off",
           "-T",
           "5",
           "-O",
@@ -198,6 +215,57 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # Publish the management/API port without giving the Sub2API process a
+  # routable network. This TCP relay can only connect to sub2api:8080.
+  ingress:
+    image: redis:8-alpine
+    container_name: sub2api-ingress
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./sub2api-ingress-connect.sh:/usr/local/bin/sub2api-ingress-connect:ro
+    entrypoint:
+      [
+        "/usr/bin/nc",
+        "-lk",
+        "-p",
+        "8080",
+        "-e",
+        "/usr/local/bin/sub2api-ingress-connect",
+      ]
+    depends_on:
+      sub2api:
+        condition: service_healthy
+    networks:
+      sub2api-ingress-network: {}
+      sub2api-ingress-uplink-network:
+        gw_priority: 1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-Y",
+          "off",
+          "-T",
+          "5",
+          "-O",
+          "/dev/null",
+          "http://sub2api:8080/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ===========================================================================
   # PostgreSQL Database
@@ -231,7 +299,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-sub2api}
       - TZ=${TZ:-Asia/Shanghai}
     networks:
-      - sub2api-network
+      - sub2api-core-network
     healthcheck:
       test:
         [
@@ -274,7 +342,7 @@ services:
       # REDISCLI_AUTH is used by redis-cli for authentication (safer than -a flag)
       - REDISCLI_AUTH=${REDIS_PASSWORD:-}
     networks:
-      - sub2api-network
+      - sub2api-core-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -283,6 +351,46 @@ services:
       start_period: 5s
     # 注意：不暴露端口到宿主机，应用通过内部网络连接
     # 如需调试，可临时添加：ports: ["127.0.0.1:6379:6379"]
+
+  # Dedicated Mihomo instance for Sub2API. It reuses the host VPN's node
+  # definitions and complete rule set. Container-only high-priority rules send
+  # the domestic relay DIRECT, while official OpenAI/Codex and Anthropic/Claude
+  # endpoints use 链式代理. The fixed residential exit remains the second hop.
+  mihomo:
+    image: redis:8-alpine
+    container_name: sub2api-mihomo
+    restart: unless-stopped
+    user: "${MIHOMO_RUN_UID:-1014}:${MIHOMO_RUN_GID:-1014}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      - MIHOMO_CHAIN_GROUP=${MIHOMO_CHAIN_GROUP:-链式代理}
+      - MIHOMO_MIXED_PORT=17890
+    volumes:
+      - ${MIHOMO_BINARY_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/clash}:/opt/mihomo/clash:ro
+      - ${MIHOMO_CONFIG_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/tigr.yaml}:/opt/mihomo/source.yaml:ro
+      - ${MIHOMO_GEOIP_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/geoip.metadb}:/opt/mihomo/geoip.metadb:ro
+      - ./mihomo-docker-entrypoint.sh:/usr/local/bin/sub2api-mihomo-entrypoint:ro
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=64m,mode=1777
+    entrypoint: ["/usr/local/bin/sub2api-mihomo-entrypoint"]
+    networks:
+      sub2api-proxy-network: {}
+      mihomo-uplink-network:
+        gw_priority: 1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "nc -z -w 2 127.0.0.1 $${MIHOMO_MIXED_PORT}",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 # =============================================================================
 # Volumes
 # =============================================================================
@@ -298,5 +406,21 @@ volumes:
 # Networks
 # =============================================================================
 networks:
-  sub2api-network:
+  # Sub2API, PostgreSQL, and Redis share an isolated data-plane network.
+  sub2api-core-network:
+    driver: bridge
+    internal: true
+  # Sub2API can reach Mihomo here, but this network has no Internet gateway.
+  sub2api-proxy-network:
+    driver: bridge
+    internal: true
+  # The published-port relay and Sub2API share only this private ingress path.
+  sub2api-ingress-network:
+    driver: bridge
+    internal: true
+  # Only Mihomo receives a routable Docker gateway for upstream access.
+  mihomo-uplink-network:
+    driver: bridge
+  # Only the ingress relay receives this gateway; Sub2API is not attached.
+  sub2api-ingress-uplink-network:
     driver: bridge
