@@ -129,6 +129,13 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	responsesReq.Model = upstreamModel
 	if responsesReq.Reasoning != nil {
 		responsesReq.Reasoning.Effort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, responsesReq.Reasoning.Effort)
+		if isKimiModel(upstreamModel) {
+			effort := "medium"
+			if anthropicReq.OutputConfig != nil && strings.TrimSpace(anthropicReq.OutputConfig.Effort) != "" {
+				effort = anthropicReq.OutputConfig.Effort
+			}
+			responsesReq.Reasoning.Effort = mapKimiAnthropicEffort(effort)
+		}
 	}
 	if previousResponseID != "" {
 		responsesReq.PreviousResponseID = previousResponseID
@@ -257,7 +264,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			}
 		}
 	}
-
 	// 4c. Apply OpenAI fast policy (may filter service_tier or block the request).
 	// Mirrors the Claude anthropic-beta "fast-mode-2026-02-01" filter, but keyed
 	// on the body-level service_tier field (priority/flex).

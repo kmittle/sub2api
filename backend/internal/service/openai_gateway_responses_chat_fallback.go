@@ -72,6 +72,10 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat completions fallback request: %w", err)
 	}
+	if normalizedBody, changed := normalizeKimiOpenAIReasoningEffortBody(chatBody, upstreamModel, originalModel); changed {
+		chatBody = normalizedBody
+		reasoningEffort = extractOpenAIReasoningEffortFromBody(chatBody, upstreamModel)
+	}
 	chatBody, err = s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, chatBody)
 	if err != nil {
 		var blocked *OpenAIFastBlockedError

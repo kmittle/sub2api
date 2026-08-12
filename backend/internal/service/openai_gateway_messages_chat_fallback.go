@@ -62,6 +62,13 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 	chatReq.Model = upstreamModel
 	chatReq.ReasoningEffort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, chatReq.ReasoningEffort)
+	if isKimiModel(upstreamModel) {
+		effort := "medium"
+		if anthropicReq.OutputConfig != nil && strings.TrimSpace(anthropicReq.OutputConfig.Effort) != "" {
+			effort = anthropicReq.OutputConfig.Effort
+		}
+		chatReq.ReasoningEffort = mapKimiAnthropicEffort(effort)
+	}
 	chatReq.Stream = clientStream
 	if clientStream {
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
