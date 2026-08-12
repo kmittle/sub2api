@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson
+	"github.com/tidwall/gjson"
 )
 
 func TestMapKimiReasoningEffortPreservesOrdinalOrder(t *testing.T) {
@@ -46,7 +46,16 @@ func TestNormalizeKimiReasoningEffortBody(t *testing.T) {
 	got, changed := normalizeKimiOpenAIReasoningEffortBody(body, "kimi-k3", "gpt-5.6-sol")
 	require.True(t, changed)
 	require.Equal(t, "max", gjson.GetBytes(got, "reasoning.effort").String())
-	require.Equal(t, "high", gjson.GetBytes(got, "reasoning_effort").String())
+	require.Equal(t, "low", gjson.GetBytes(got, "reasoning_effort").String())
+
+	native := extractKimiNativeReasoningEffortFromBody(got)
+	require.NotNil(t, native)
+	require.Equal(t, "max", *native)
+
+	nativeBody := []byte(`{"model":"kimi-k3","reasoning_effort":"high"}`)
+	normalized, changed := normalizeKimiOpenAIReasoningEffortBody(nativeBody, "kimi-k3", "kimi-k3")
+	require.True(t, changed == false)
+	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning_effort").String())
 
 	unchanged, changed := normalizeKimiOpenAIReasoningEffortBody(body, "gpt-5.6-sol", "gpt-5.6-sol")
 	require.False(t, changed)

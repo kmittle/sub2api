@@ -71,11 +71,32 @@ func mapKimiOpenAIReasoningEffort(raw string) string {
 }
 
 func mapKimiOpenAIReasoningEffortForModel(raw, sourceModel string) string {
+	// A request that already names a Kimi model is speaking Kimi's native
+	// vocabulary. Preserve the three supported values instead of interpreting
+	// `high` through the larger OpenAI vocabulary and accidentally collapsing
+	// it to `low`. Unknown OpenAI aliases still use ordinal mapping below.
+	if isKimiModel(sourceModel) {
+		switch normalizeEffortLabel(raw) {
+		case "low":
+			return "low"
+		case "high":
+			return "high"
+		case "max":
+			return "max"
+		case "minimal", "medium":
+			return "low"
+		case "xhigh", "extrahigh":
+			return "high"
+		default:
+			return ""
+		}
+	}
+
 	order := openAIReasoningEffortOrder
 	// GPT-5.6 models expose the four practical CLI tiers low/medium/high/max.
 	// Use that model's actual ordered scale so high remains the second-highest
 	// tier; older/future OpenAI models keep the full compatibility scale.
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(sourceModel)), "gpt-5.6") {
+	if isOpenAIGPT56Model(sourceModel) {
 		order = []string{"low", "medium", "high", "max"}
 	}
 	return mapKimiEffortByOrdinal(raw, order)
@@ -115,6 +136,25 @@ func normalizeKimiOpenAIReasoningEffortBody(body []byte, model, sourceModel stri
 		changed = true
 	}
 	return result, changed
+}
+
+// extractKimiNativeReasoningEffortFromBody reads effort after the request body
+// has been normalized for Kimi. It deliberately does not run the generic
+// OpenAI normalizer: Kimi's native `max` must remain `max` for billing and
+// usage metadata rather than being recorded as OpenAI's legacy `xhigh`.
+func extractKimiNativeReasoningEffortFromBody(body []byte) *string {
+	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+		field := gjson.GetBytes(body, path)
+		if !field.Exists() || field.Type != gjson.String {
+			continue
+		}
+		switch value := normalizeEffortLabel(field.String()); value {
+		case "low", "high", "max":
+			native := value
+			return &native
+		}
+	}
+	return nil
 }
 
 // normalizeKimiAnthropicEffort maps output_config.effort before the Anthropic

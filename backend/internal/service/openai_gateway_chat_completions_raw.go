@@ -95,7 +95,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	}
 	if normalizedBody, normalized := normalizeKimiOpenAIReasoningEffortBody(upstreamBody, upstreamModel, originalModel); normalized {
 		upstreamBody = normalizedBody
-		if effort := extractOpenAIReasoningEffortFromBody(upstreamBody, upstreamModel); effort != nil {
+	}
+	if isKimiModel(upstreamModel) {
+		if effort := extractKimiNativeReasoningEffortFromBody(upstreamBody); effort != nil {
 			reasoningEffort = effort
 		}
 	}

@@ -74,7 +74,9 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	}
 	if normalizedBody, changed := normalizeKimiOpenAIReasoningEffortBody(chatBody, upstreamModel, originalModel); changed {
 		chatBody = normalizedBody
-		reasoningEffort = extractOpenAIReasoningEffortFromBody(chatBody, upstreamModel)
+	}
+	if isKimiModel(upstreamModel) {
+		reasoningEffort = extractKimiNativeReasoningEffortFromBody(chatBody)
 	}
 	chatBody, err = s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, chatBody)
 	if err != nil {
