@@ -191,6 +191,9 @@ func ProvideHandlers(
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 ) *Handlers {
+	if openaiGatewayHandler != nil && gatewayHandler != nil {
+		openaiGatewayHandler.SetMessagesFallbackHandler(gatewayHandler.MessagesCrossPlatformFallback)
+	}
 	return &Handlers{
 		Auth:             authHandler,
 		User:             userHandler,

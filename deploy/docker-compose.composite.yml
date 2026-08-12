@@ -1,0 +1,4 @@
+services:
+  sub2api:
+    image: ${SUB2API_CUSTOM_IMAGE:?set SUB2API_CUSTOM_IMAGE}
+    pull_policy: never

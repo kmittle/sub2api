@@ -848,7 +848,10 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 		group.DefaultMappedModel = *input.DefaultMappedModel
 	}
 	if input.MessagesDispatchModelConfig != nil {
-		group.MessagesDispatchModelConfig = normalizeOpenAIMessagesDispatchModelConfig(*input.MessagesDispatchModelConfig)
+		group.MessagesDispatchModelConfig = mergeOpenAIMessagesDispatchModelConfigForUpdate(
+			group.MessagesDispatchModelConfig,
+			*input.MessagesDispatchModelConfig,
+		)
 	}
 	if input.ModelsListConfig != nil {
 		group.ModelsListConfig = normalizeGroupModelsListConfig(*input.ModelsListConfig)
