@@ -186,6 +186,11 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	anthropicState := apicompat.NewChatCompletionsToAnthropicStreamState(originalModel)
 	clientDisconnected := false
+	keepaliveInterval := time.Duration(0)
+	if isClaudeCodeStreamRequest(c) && s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
+		keepaliveInterval = time.Duration(s.cfg.Gateway.StreamKeepaliveInterval) * time.Second
+	}
+	streamInterval := claudeCodeStreamDataIntervalTimeoutForRequest(s.cfg, c)
 
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
@@ -211,7 +216,29 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}
 	}
 
-	scan := s.scanCCStream(resp, "openai messages chat fallback", requestID, startTime, emitChunk)
+	scan := s.scanCCStreamWithPolicy(
+		resp,
+		"openai messages chat fallback",
+		requestID,
+		startTime,
+		ccStreamScanOptions{
+			streamInterval:    streamInterval,
+			keepaliveInterval: keepaliveInterval,
+			onKeepalive: func() bool {
+				if clientDisconnected {
+					return false
+				}
+				writeStreamHeaders()
+				if _, err := fmt.Fprint(c.Writer, "event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
+					clientDisconnected = true
+					return false
+				}
+				c.Writer.Flush()
+				return true
+			},
+		},
+		emitChunk,
+	)
 	usage := scan.Usage
 
 	if scan.Err != nil {

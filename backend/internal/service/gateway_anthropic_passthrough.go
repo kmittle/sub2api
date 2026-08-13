@@ -457,10 +457,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	}(scanBuf)
 	defer close(done)
 
-	streamInterval := time.Duration(0)
-	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-	}
+	streamInterval := streamDataIntervalTimeoutForRequest(s.cfg, c)
 	var intervalTicker *time.Ticker
 	if streamInterval > 0 {
 		intervalTicker = time.NewTicker(streamInterval)

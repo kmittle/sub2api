@@ -18,7 +18,7 @@ var kimiReasoningEffortLevels = [...]string{"low", "high", "max"}
 var (
 	// The order is the public order exposed by the two client protocols.
 	// Mapping uses these ranks, never same-name matching.
-	claudeReasoningEffortOrder = []string{"low", "medium", "high", "max"}
+	claudeReasoningEffortOrder = []string{"low", "medium", "high", "xhigh", "max"}
 	openAIReasoningEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 

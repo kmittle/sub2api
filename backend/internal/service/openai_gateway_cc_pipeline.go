@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -242,6 +243,15 @@ type ccStreamScanState struct {
 	Err error
 }
 
+// ccStreamScanOptions adds the optional idle/keepalive policy used by clients
+// whose upstream can pause while an agent or tool is running. A zero-value
+// policy preserves the original synchronous scanner behavior.
+type ccStreamScanOptions struct {
+	streamInterval    time.Duration
+	keepaliveInterval time.Duration
+	onKeepalive       func() bool
+}
+
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
 // 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
 // emit 回调做各自的协议转换与写出。读错误按既有约定过滤 context 取消类噪声后
@@ -253,22 +263,32 @@ func (s *OpenAIGatewayService) scanCCStream(
 	startTime time.Time,
 	emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
+	return s.scanCCStreamWithPolicy(resp, logPrefix, requestID, startTime, ccStreamScanOptions{}, emit)
+}
+
+func (s *OpenAIGatewayService) scanCCStreamWithPolicy(
+	resp *http.Response,
+	logPrefix string,
+	requestID string,
+	startTime time.Time,
+	options ccStreamScanOptions,
+	emit func(*apicompat.ChatCompletionsChunk),
+) ccStreamScanState {
 	var st ccStreamScanState
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
+	processLine := func(line string) bool {
 		payload, ok := extractOpenAISSEDataLine(line)
 		if !ok {
-			continue
+			return false
 		}
 		payload = strings.TrimSpace(payload)
 		if payload == "" {
-			continue
+			return false
 		}
 		if payload == "[DONE]" {
 			st.SawDone = true
-			break
+			return true
 		}
 
 		if u := extractCCStreamUsage(payload); u != nil {
@@ -281,25 +301,155 @@ func (s *OpenAIGatewayService) scanCCStream(
 				zap.Error(err),
 				zap.String("request_id", requestID),
 			)
-			continue
+			return false
 		}
 		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {
 			ms := int(time.Since(startTime).Milliseconds())
 			st.FirstTokenMs = &ms
 		}
 		emit(&chunk)
+		return false
 	}
 
-	if err := scanner.Err(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			logger.L().Warn(logPrefix+": stream read error",
-				zap.Error(err),
-				zap.String("request_id", requestID),
-			)
+	// Keep the legacy synchronous path for callers that do not opt into a
+	// policy. This avoids introducing a reader goroutine on ordinary bridges.
+	if options.streamInterval <= 0 && options.keepaliveInterval <= 0 {
+		for scanner.Scan() {
+			if processLine(scanner.Text()) {
+				break
+			}
 		}
-		st.Err = err
+		if err := scanner.Err(); err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				logger.L().Warn(logPrefix+": stream read error",
+					zap.Error(err),
+					zap.String("request_id", requestID),
+				)
+			}
+			st.Err = err
+		}
+		return st
 	}
-	return st
+
+	type scanEvent struct {
+		line string
+		err  error
+	}
+	events := make(chan scanEvent, 16)
+	done := make(chan struct{})
+	var lastReadAt atomic.Int64
+	lastReadAt.Store(time.Now().UnixNano())
+	go func() {
+		defer close(events)
+		for scanner.Scan() {
+			lastReadAt.Store(time.Now().UnixNano())
+			select {
+			case events <- scanEvent{line: scanner.Text()}:
+			case <-done:
+				return
+			}
+		}
+		ev := scanEvent{err: scanner.Err()}
+		select {
+		case events <- ev:
+		case <-done:
+		}
+	}()
+	defer func() {
+		close(done)
+		// Interrupt a reader blocked in Scan after the caller has returned.
+		_ = resp.Body.Close()
+	}()
+
+	var timeoutCh <-chan time.Time
+	var timeoutTimer *time.Timer
+	resetTimeout := func() {
+		if options.streamInterval <= 0 {
+			return
+		}
+		if timeoutTimer == nil {
+			timeoutTimer = time.NewTimer(options.streamInterval)
+			timeoutCh = timeoutTimer.C
+			return
+		}
+		if !timeoutTimer.Stop() {
+			select {
+			case <-timeoutTimer.C:
+			default:
+			}
+		}
+		timeoutTimer.Reset(options.streamInterval)
+	}
+	stopTimeout := func() {
+		if timeoutTimer == nil {
+			return
+		}
+		if !timeoutTimer.Stop() {
+			select {
+			case <-timeoutTimer.C:
+			default:
+			}
+		}
+	}
+	defer stopTimeout()
+	resetTimeout()
+
+	var keepaliveCh <-chan time.Time
+	var keepaliveTicker *time.Ticker
+	keepaliveEnabled := options.keepaliveInterval > 0 && options.onKeepalive != nil
+	if keepaliveEnabled {
+		keepaliveTicker = time.NewTicker(options.keepaliveInterval)
+		defer keepaliveTicker.Stop()
+		keepaliveCh = keepaliveTicker.C
+	}
+	lastActivityAt := time.Now()
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return st
+			}
+			if ev.err != nil {
+				if !errors.Is(ev.err, context.Canceled) && !errors.Is(ev.err, context.DeadlineExceeded) {
+					logger.L().Warn(logPrefix+": stream read error",
+						zap.Error(ev.err),
+						zap.String("request_id", requestID),
+					)
+				}
+				st.Err = ev.err
+				return st
+			}
+			resetTimeout()
+			lastActivityAt = time.Now()
+			if processLine(ev.line) {
+				return st
+			}
+
+		case <-timeoutCh:
+			lastRead := time.Unix(0, lastReadAt.Load())
+			if time.Since(lastRead) < options.streamInterval {
+				resetTimeout()
+				continue
+			}
+			_ = resp.Body.Close()
+			logger.L().Warn(logPrefix+": data interval timeout",
+				zap.String("request_id", requestID),
+				zap.Duration("interval", options.streamInterval),
+			)
+			st.Err = fmt.Errorf("stream data interval timeout")
+			return st
+
+		case <-keepaliveCh:
+			if !keepaliveEnabled || time.Since(lastActivityAt) < options.keepaliveInterval {
+				continue
+			}
+			if !options.onKeepalive() {
+				keepaliveEnabled = false
+				continue
+			}
+			lastActivityAt = time.Now()
+		}
+	}
 }
 
 // logCCStreamMissingDoneSentinel 记录"上游未发 [DONE] 哨兵即结束"的 debug 日志。

@@ -975,6 +975,9 @@ type GatewayConfig struct {
 
 	// StreamDataIntervalTimeout: 流数据间隔超时（秒），0表示禁用
 	StreamDataIntervalTimeout int `mapstructure:"stream_data_interval_timeout"`
+	// ClaudeCodeStreamDataIntervalTimeout: Claude Code 流请求的上游数据间隔超时（秒）。
+	// 0表示沿用普通流间隔超时；用于 Claude Code 等待 agent/tool 时的长空窗。
+	ClaudeCodeStreamDataIntervalTimeout int `mapstructure:"claude_code_stream_data_interval_timeout"`
 	// StreamKeepaliveInterval: 流式 keepalive 间隔（秒），0表示禁用
 	StreamKeepaliveInterval int `mapstructure:"stream_keepalive_interval"`
 	// ImageStreamDataIntervalTimeout: 图片流数据间隔超时（秒），0表示禁用
@@ -2373,6 +2376,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
+	viper.SetDefault("gateway.claude_code_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.image_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
@@ -3229,6 +3233,13 @@ func (c *Config) Validate() error {
 	if c.Gateway.StreamDataIntervalTimeout != 0 &&
 		(c.Gateway.StreamDataIntervalTimeout < 30 || c.Gateway.StreamDataIntervalTimeout > 300) {
 		return fmt.Errorf("gateway.stream_data_interval_timeout must be 0 or between 30-300 seconds")
+	}
+	if c.Gateway.ClaudeCodeStreamDataIntervalTimeout < 0 {
+		return fmt.Errorf("gateway.claude_code_stream_data_interval_timeout must be non-negative")
+	}
+	if c.Gateway.ClaudeCodeStreamDataIntervalTimeout != 0 &&
+		(c.Gateway.ClaudeCodeStreamDataIntervalTimeout < 60 || c.Gateway.ClaudeCodeStreamDataIntervalTimeout > 1800) {
+		return fmt.Errorf("gateway.claude_code_stream_data_interval_timeout must be 0 or between 60-1800 seconds")
 	}
 	if c.Gateway.StreamKeepaliveInterval < 0 {
 		return fmt.Errorf("gateway.stream_keepalive_interval must be non-negative")

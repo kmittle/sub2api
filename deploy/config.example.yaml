@@ -483,6 +483,9 @@ gateway:
   # Stream data interval timeout (seconds), 0=disable
   # 流数据间隔超时（秒），0=禁用
   stream_data_interval_timeout: 180
+  # Claude Code agent/tool idle gap timeout (seconds), 0=use the ordinary stream timeout
+  # Claude Code 等待 agent/tool 时的上游空窗超时（秒），0=沿用普通流超时
+  claude_code_stream_data_interval_timeout: 900
   # Stream keepalive interval (seconds), 0=disable
   # 流式 keepalive 间隔（秒），0=禁用
   stream_keepalive_interval: 10

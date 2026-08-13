@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
@@ -224,6 +225,44 @@ func TestForwardAsAnthropic_ForceChatCompletionsStreamingClosesOpenBlockOnDone(t
 	require.Equal(t, 3, result.Usage.OutputTokens)
 	require.True(t, result.Stream)
 	require.NotNil(t, result.FirstTokenMs)
+}
+
+func TestForwardAsAnthropic_ForceChatCompletionsClaudeIdleGapKeepsConnection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("User-Agent", "claude-cli/2.1.220 (external, cli)")
+
+	reader, writer := io.Pipe()
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_msg_chat_idle"}},
+		Body:       reader,
+	}}
+	go func() {
+		_, _ = io.WriteString(writer, `data: {"id":"chatcmpl_idle","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`+"\n\n")
+		time.Sleep(2500 * time.Millisecond)
+		_, _ = io.WriteString(writer, `data: {"id":"chatcmpl_idle","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+		_ = writer.Close()
+	}()
+
+	cfg := rawChatCompletionsTestConfig()
+	cfg.Gateway.StreamDataIntervalTimeout = 1
+	cfg.Gateway.ClaudeCodeStreamDataIntervalTimeout = 8
+	cfg.Gateway.StreamKeepaliveInterval = 1
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, forceChatMessagesFallbackAccount(), body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), "event: ping")
+	require.Contains(t, rec.Body.String(), "event: message_stop")
+	require.Contains(t, rec.Body.String(), `"text":"ok"`)
 }
 
 // Covers multi-chunk tool_call fragments aggregated by index and finalized as

@@ -1878,6 +1878,16 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.stream_data_interval_timeout must be non-negative",
 		},
 		{
+			name:    "gateway claude code stream data interval range",
+			mutate:  func(c *Config) { c.Gateway.ClaudeCodeStreamDataIntervalTimeout = 30 },
+			wantErr: "gateway.claude_code_stream_data_interval_timeout",
+		},
+		{
+			name:    "gateway claude code stream data interval negative",
+			mutate:  func(c *Config) { c.Gateway.ClaudeCodeStreamDataIntervalTimeout = -1 },
+			wantErr: "gateway.claude_code_stream_data_interval_timeout must be non-negative",
+		},
+		{
 			name:    "gateway image stream keepalive range",
 			mutate:  func(c *Config) { c.Gateway.ImageStreamKeepaliveInterval = 4 },
 			wantErr: "gateway.image_stream_keepalive_interval",
@@ -2525,6 +2535,9 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.StreamDataIntervalTimeout != 180 {
 		t.Fatalf("stream_data_interval_timeout = %d, want 180", cfg.Gateway.StreamDataIntervalTimeout)
+	}
+	if cfg.Gateway.ClaudeCodeStreamDataIntervalTimeout != 900 {
+		t.Fatalf("claude_code_stream_data_interval_timeout = %d, want 900", cfg.Gateway.ClaudeCodeStreamDataIntervalTimeout)
 	}
 	if cfg.Gateway.StreamKeepaliveInterval != 10 {
 		t.Fatalf("stream_keepalive_interval = %d, want 10", cfg.Gateway.StreamKeepaliveInterval)

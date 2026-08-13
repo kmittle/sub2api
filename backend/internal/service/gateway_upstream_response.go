@@ -759,10 +759,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	}(scanBuf)
 	defer close(done)
 
-	streamInterval := time.Duration(0)
-	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-	}
+	streamInterval := streamDataIntervalTimeoutForRequest(s.cfg, c)
 	// 仅监控上游数据间隔超时，避免下游写入阻塞导致误判
 	var intervalTicker *time.Ticker
 	if streamInterval > 0 {
