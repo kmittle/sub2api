@@ -6,6 +6,8 @@
 data/
 postgres_data/
 redis_data/
+bin/
+secrets/
 
 # Environment configuration (contains sensitive information)
 .env

@@ -1,0 +1,94 @@
+# Server-only overlay. Combine with docker-compose.server.yml and
+# docker-compose.network.yml; the latter owns the sub2api-proxy definition.
+services:
+  sub2api:
+    environment:
+      NO_PROXY: ${SUB2API_NO_PROXY:-127.0.0.1,localhost,::1,sub2api,postgres,redis,mihomo,caddy,kimi-membership-relay}
+      no_proxy: ${SUB2API_NO_PROXY:-127.0.0.1,localhost,::1,sub2api,postgres,redis,mihomo,caddy,kimi-membership-relay}
+
+  kimi-membership-relay:
+    image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    pull_policy: never
+    container_name: sub2api-kimi-membership-relay
+    user: "${KIMI_RELAY_RUN_UID:-1000}:${KIMI_RELAY_RUN_GID:-1001}"
+    entrypoint: ["/usr/local/bin/kimi-membership-relay"]
+    read_only: true
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    stop_grace_period: 25s
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 96MiB
+      KIMI_RELAY_LISTEN_ADDRESS: 0.0.0.0:8090
+      KIMI_RELAY_SECRET_FILE: /run/secrets/kimi-relay-key
+      KIMI_RELAY_CREDENTIALS_FILE: /run/kimi/credentials/kimi-code.json
+      KIMI_RELAY_DEVICE_ID_FILE: /run/kimi/device_id
+      KIMI_RELAY_REFRESH_LOCK_TARGET: /run/kimi/oauth/kimi-code
+      KIMI_RELAY_UPSTREAM_PROXY: http://mihomo:17891
+      KIMI_RELAY_MAX_IN_FLIGHT: "2"
+      KIMI_RELAY_MAX_REQUEST_BYTES: "33554432"
+    volumes:
+      - type: bind
+        source: ${KIMI_RELAY_BINARY_PATH:-/home/ubuntu/sub2api/deploy/bin/kimi-membership-relay}
+        target: /usr/local/bin/kimi-membership-relay
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KIMI_RELAY_SECRET_PATH:-/home/ubuntu/sub2api/deploy/secrets/kimi-relay-key}
+        target: /run/secrets/kimi-relay-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KIMI_CODE_CREDENTIALS_DIR:-/home/ubuntu/.kimi-code/credentials}
+        target: /run/kimi/credentials
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KIMI_CODE_DEVICE_ID_PATH:-/home/ubuntu/.kimi-code/device_id}
+        target: /run/kimi/device_id
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KIMI_CODE_OAUTH_LOCK_DIR:-/home/ubuntu/.kimi-code/oauth}
+        target: /run/kimi/oauth
+        read_only: false
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=1000,gid=1001
+    networks:
+      sub2api-proxy:
+        interface_name: eth0
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-Y",
+          "off",
+          "-q",
+          "-T",
+          "3",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8090/health",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 5s
