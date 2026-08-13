@@ -84,6 +84,10 @@ func cloneGroupVideoModelPrices(value map[string]map[string]float64) map[string]
 
 func cloneGroupMessagesDispatchModelConfig(value OpenAIMessagesDispatchModelConfig) OpenAIMessagesDispatchModelConfig {
 	cloned := value
+	if value.Fallback != nil {
+		fallbackCopy := *value.Fallback
+		cloned.Fallback = &fallbackCopy
+	}
 	if value.ExactModelMappings != nil {
 		cloned.ExactModelMappings = make(map[string]string, len(value.ExactModelMappings))
 		for requestedModel, mappedModel := range value.ExactModelMappings {

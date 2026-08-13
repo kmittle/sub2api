@@ -39,7 +39,31 @@ func normalizeOpenAIMessagesDispatchModelConfig(cfg OpenAIMessagesDispatchModelC
 		}
 	}
 
+	if cfg.Fallback != nil {
+		targetPlatform := strings.ToLower(strings.TrimSpace(cfg.Fallback.TargetPlatform))
+		// Cross-platform Messages fallback is deliberately restricted to an
+		// Anthropic target for now. Other providers use different wire
+		// protocols and must not be entered through the Claude Messages path.
+		if targetPlatform == PlatformAnthropic && cfg.Fallback.Enabled {
+			out.Fallback = &OpenAIMessagesDispatchFallbackConfig{
+				Enabled:        true,
+				TargetPlatform: targetPlatform,
+			}
+		}
+	}
+
 	return out
+}
+
+// mergeOpenAIMessagesDispatchModelConfigForUpdate keeps the server-managed
+// fallback stanza when an older admin client updates only the model mappings.
+// Sending an explicit fallback object with enabled=false still disables it.
+func mergeOpenAIMessagesDispatchModelConfigForUpdate(current, incoming OpenAIMessagesDispatchModelConfig) OpenAIMessagesDispatchModelConfig {
+	if incoming.Fallback == nil && current.Fallback != nil {
+		fallbackCopy := *current.Fallback
+		incoming.Fallback = &fallbackCopy
+	}
+	return normalizeOpenAIMessagesDispatchModelConfig(incoming)
 }
 
 func claudeMessagesDispatchFamily(model string) string {
@@ -57,6 +81,45 @@ func claudeMessagesDispatchFamily(model string) string {
 	default:
 		return ""
 	}
+}
+
+// resolveConfiguredMessagesDispatchModel applies exact mappings first, then
+// trailing-star prefix mappings. Prefix matches use the longest configured
+// prefix so a specific rule cannot be shadowed by a broader one.
+func resolveConfiguredMessagesDispatchModel(cfg OpenAIMessagesDispatchModelConfig, requestedModel string) (string, bool) {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return "", false
+	}
+	if mappedModel := strings.TrimSpace(cfg.ExactModelMappings[requestedModel]); mappedModel != "" {
+		return mappedModel, true
+	}
+	normalizedRequestedModel := strings.ToLower(requestedModel)
+	bestPrefix := ""
+	bestMappedModel := ""
+	for configuredModel, mappedModel := range cfg.ExactModelMappings {
+		configuredModel = strings.TrimSpace(configuredModel)
+		if strings.HasSuffix(configuredModel, "*") {
+			prefix := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(configuredModel, "*")))
+			if prefix == "" || !strings.HasPrefix(normalizedRequestedModel, prefix) || len(prefix) <= len(bestPrefix) {
+				continue
+			}
+			mappedModel = strings.TrimSpace(mappedModel)
+			if mappedModel == "" {
+				continue
+			}
+			bestPrefix = prefix
+			bestMappedModel = mappedModel
+			continue
+		}
+		if strings.EqualFold(configuredModel, requestedModel) && strings.TrimSpace(mappedModel) != "" {
+			return strings.TrimSpace(mappedModel), true
+		}
+	}
+	if bestMappedModel != "" {
+		return bestMappedModel, true
+	}
+	return "", false
 }
 
 func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
@@ -80,7 +143,7 @@ func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
 	}
 
 	cfg := normalizeOpenAIMessagesDispatchModelConfig(g.MessagesDispatchModelConfig)
-	if mappedModel := strings.TrimSpace(cfg.ExactModelMappings[requestedModel]); mappedModel != "" {
+	if mappedModel, ok := resolveConfiguredMessagesDispatchModel(cfg, requestedModel); ok {
 		return mappedModel
 	}
 
@@ -105,8 +168,39 @@ func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
 	}
 }
 
+// ResolveMessagesDispatchFallbackPlatform returns the explicitly configured
+// cross-platform retry target for a Claude model. A model family must still be
+// recognized by the primary Messages dispatch mapping; this prevents an
+// unrelated OpenAI-compatible request from entering the fallback path.
+func (g *Group) ResolveMessagesDispatchFallbackPlatform(requestedModel string) (string, bool) {
+	if g == nil || g.Platform != PlatformComposite {
+		return "", false
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" || !strings.HasPrefix(strings.ToLower(requestedModel), "claude") {
+		return "", false
+	}
+	cfg := normalizeOpenAIMessagesDispatchModelConfig(g.MessagesDispatchModelConfig)
+	// Known Claude families use the family mapping. Custom families (for
+	// example claude-fable-5) are eligible only when the group explicitly
+	// declares an exact primary mapping; this keeps arbitrary Claude-looking
+	// model names from entering the fallback path by accident.
+	if claudeMessagesDispatchFamily(requestedModel) == "" {
+		if _, mapped := resolveConfiguredMessagesDispatchModel(cfg, requestedModel); !mapped {
+			return "", false
+		}
+	}
+	if g.ResolveMessagesDispatchModel(requestedModel) == "" {
+		return "", false
+	}
+	if cfg.Fallback == nil || !cfg.Fallback.Enabled {
+		return "", false
+	}
+	return cfg.Fallback.TargetPlatform, true
+}
+
 func sanitizeGroupMessagesDispatchFields(g *Group) {
-	if g == nil || g.Platform == PlatformOpenAI {
+	if g == nil || g.Platform == PlatformOpenAI || g.Platform == PlatformComposite {
 		return
 	}
 	g.AllowMessagesDispatch = false

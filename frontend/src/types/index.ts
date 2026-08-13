@@ -536,6 +536,10 @@ export interface OpenAIMessagesDispatchModelConfig {
   sonnet_mapped_model?: string
   haiku_mapped_model?: string
   exact_model_mappings?: Record<string, string>
+  fallback?: {
+    enabled?: boolean
+    target_platform?: 'anthropic'
+  }
 }
 
 export interface ReasoningEffortMapping {

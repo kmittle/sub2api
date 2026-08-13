@@ -41,6 +41,7 @@ type OpenAIGatewayHandler struct {
 	opsService                 *service.OpsService
 	concurrencyHelper          *ConcurrencyHelper
 	imageLimiter               *imageConcurrencyLimiter
+	messagesFallbackHandler    MessagesFallbackHandler
 	maxAccountSwitches         int
 	cfg                        *config.Config
 }
@@ -985,9 +986,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	if !acquired {
 		return
 	}
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
+	var userSlotReleaseOnce sync.Once
+	releaseUserSlot := func() {
+		userSlotReleaseOnce.Do(func() {
+			if userReleaseFunc != nil {
+				userReleaseFunc()
+			}
+		})
 	}
+	defer releaseUserSlot()
 
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai_messages.billing_eligibility_check_failed", zap.Error(err))
@@ -998,6 +1005,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
+	responseHeadersBeforeDispatch := c.Writer.Header().Clone()
 
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
@@ -1052,15 +1060,19 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
-				if err != nil {
-					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
-					if !cls.ModelNotFound {
-						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-					}
-					h.anthropicStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
+				if h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, err) {
 					return
 				}
+				cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
+				if !cls.ModelNotFound {
+					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+				}
+				h.anthropicStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
+				return
 			} else {
+				if lastFailoverErr != nil && h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, lastFailoverErr) {
+					return
+				}
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -1070,6 +1082,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if len(failedAccountIDs) == 0 && h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, service.ErrNoAvailableAccounts) {
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -1180,11 +1195,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						if h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, failoverErr) {
+							return
+						}
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+						if h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, failoverErr) {
+							return
+						}
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
