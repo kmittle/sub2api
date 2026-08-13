@@ -37,7 +37,8 @@ func TestMapKimiOpenAIReasoningEffortForGPT56UsesPracticalCLIOrder(t *testing.T)
 func TestMapKimiAnthropicEffortPreservesClaudeOrder(t *testing.T) {
 	require.Equal(t, "low", mapKimiAnthropicEffort("low"))
 	require.Equal(t, "low", mapKimiAnthropicEffort("medium"))
-	require.Equal(t, "high", mapKimiAnthropicEffort("high"))
+	require.Equal(t, "low", mapKimiAnthropicEffort("high"))
+	require.Equal(t, "high", mapKimiAnthropicEffort("xhigh"))
 	require.Equal(t, "max", mapKimiAnthropicEffort("max"))
 }
 
