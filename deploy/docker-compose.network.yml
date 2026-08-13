@@ -1,0 +1,60 @@
+services:
+  mihomo:
+    image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    container_name: sub2api-mihomo
+    user: "1000:1001"
+    entrypoint:
+      - /bin/sh
+      - /opt/mihomo/mihomo-docker-entrypoint.sh
+    working_dir: /run/mihomo
+    read_only: true
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    stop_grace_period: 15s
+    volumes:
+      - ./mihomo-docker-entrypoint.sh:/opt/mihomo/mihomo-docker-entrypoint.sh:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/clash:/opt/mihomo/clash:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/tigr.yaml:/opt/mihomo-source/tigr.yaml:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/geoip.metadb:/opt/mihomo-source/geoip.metadb:ro
+    tmpfs:
+      - /run/mihomo:rw,noexec,nosuid,nodev,mode=0700,uid=1000,gid=1001
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -T
+        - "3"
+        - -O
+        - /dev/null
+        - http://127.0.0.1:19090/version
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 10s
+    networks:
+      sub2api-proxy:
+        interface_name: eth0
+        ipv4_address: 172.30.0.2
+        gw_priority: 0
+      mihomo-uplink:
+        interface_name: eth1
+        gw_priority: 1
+
+networks:
+  sub2api-proxy:
+    name: sub2api-proxy
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
+  mihomo-uplink:
+    name: mihomo-uplink
+    driver: bridge

@@ -8,6 +8,8 @@ postgres_data/
 redis_data/
 bin/
 secrets/
+caddy_data/
+backups/
 
 # Environment configuration (contains sensitive information)
 .env
@@ -19,3 +21,4 @@ secrets/
 # Temporary files
 *.tmp
 *.log
+*.dump
