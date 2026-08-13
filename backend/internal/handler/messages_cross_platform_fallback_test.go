@@ -142,6 +142,38 @@ func TestMessagesCrossPlatformFallback_RejectsNonEligibleCause(t *testing.T) {
 	}
 }
 
+func TestMessagesCrossPlatformFallback_CurrentSelectionPolicyErrorWinsAfterUpstreamFailure(t *testing.T) {
+	const body = `{"model":"claude-opus-5"}`
+	group := messagesFallbackTestGroup()
+	previousUpstreamFailure := &service.UpstreamFailoverError{
+		StatusCode:        http.StatusServiceUnavailable,
+		NextAccountAction: service.NextAccountRetry,
+	}
+	currentSelectionErr := fmt.Errorf("%w supporting model: gpt-test (channel pricing restriction)", service.ErrNoAvailableAccounts)
+	c, writer := newMessagesFallbackTestContext(t, []byte(body), group)
+	called := false
+	h := &OpenAIGatewayHandler{}
+	h.SetMessagesFallbackHandler(func(*gin.Context, []byte, string, string) { called = true })
+
+	require.True(t, messagesCrossPlatformFallbackCauseEligible(previousUpstreamFailure),
+		"the previous upstream error would have allowed fallback")
+	h.handleMessagesAccountSelectionFailureAfterFailover(
+		c,
+		&service.APIKey{Group: group},
+		[]byte(body),
+		"claude-opus-5",
+		nil,
+		nil,
+		nil,
+		currentSelectionErr,
+		previousUpstreamFailure,
+		false,
+	)
+
+	require.False(t, called, "the current channel pricing restriction must prevent fallback")
+	require.Equal(t, http.StatusServiceUnavailable, writer.Code)
+}
+
 func TestGatewayMessagesCrossPlatformFallback_ResetsCompositeRoutingContext(t *testing.T) {
 	const body = `{"model":"claude-opus-5","messages":[]}`
 	group := messagesFallbackTestGroup()

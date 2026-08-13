@@ -1068,14 +1068,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				h.anthropicStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
-				if lastFailoverErr != nil && h.tryMessagesCrossPlatformFallback(c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog, lastFailoverErr) {
-					return
-				}
-				if lastFailoverErr != nil {
-					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
-				} else {
-					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
-				}
+				h.handleMessagesAccountSelectionFailureAfterFailover(
+					c, apiKey, body, reqModel, responseHeadersBeforeDispatch, releaseUserSlot, reqLog,
+					err, lastFailoverErr, streamStarted,
+				)
 				return
 			}
 		}

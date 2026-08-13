@@ -97,6 +97,39 @@ func (h *OpenAIGatewayHandler) tryMessagesCrossPlatformFallback(
 	return true
 }
 
+func (h *OpenAIGatewayHandler) handleMessagesAccountSelectionFailureAfterFailover(
+	c *gin.Context,
+	apiKey *service.APIKey,
+	body []byte,
+	requestedModel string,
+	responseHeadersBeforeDispatch http.Header,
+	releaseUserSlot func(),
+	reqLog *zap.Logger,
+	selectionErr error,
+	lastFailoverErr *service.UpstreamFailoverError,
+	streamStarted bool,
+) {
+	// The current selection error may represent a newly applied policy veto.
+	// Never let the previous upstream failure determine fallback eligibility.
+	if h.tryMessagesCrossPlatformFallback(
+		c,
+		apiKey,
+		body,
+		requestedModel,
+		responseHeadersBeforeDispatch,
+		releaseUserSlot,
+		reqLog,
+		selectionErr,
+	) {
+		return
+	}
+	if lastFailoverErr != nil {
+		h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
+		return
+	}
+	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
+}
+
 func messagesCrossPlatformFallbackCauseEligible(cause error) bool {
 	if cause == nil {
 		return false
