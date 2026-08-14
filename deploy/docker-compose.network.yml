@@ -33,7 +33,7 @@ services:
       timeout: 4s
       retries: 6
       start_period: 10s
-    networks:
+    networks: !override
       sub2api-proxy:
         interface_name: eth0
         ipv4_address: 172.30.0.2

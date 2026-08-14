@@ -74,6 +74,7 @@ services:
     networks:
       sub2api-proxy:
         interface_name: eth0
+        ipv4_address: 172.30.0.3
     healthcheck:
       test:
         [

@@ -1,4 +1,9 @@
 services:
+  # Base-compose ingress is for standalone :8080 publishing.
+  # Server mode uses Caddy instead, so keep it disabled by default.
+  ingress:
+    profiles: ["standalone-ingress"]
+
   sub2api:
     image: weishaw/sub2api@sha256:7a924a8ecd5ad103d7b2730a3e5f94db5d4f09bb8273f0298ac3e13380bdb3a1
     pull_policy: never
