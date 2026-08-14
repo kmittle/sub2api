@@ -502,6 +502,39 @@ func TestGrokQuotaServiceProbeUsageStoresHeaders(t *testing.T) {
 	require.NotNil(t, repo.updates[42][grokQuotaSnapshotExtraKey])
 }
 
+func TestGrokQuotaServiceProbeUsageForQuotaRecoveryIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	account := healthyGrokQuotaOAuthAccount(420)
+	limitedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	resetAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	account.RateLimitedAt = &limitedAt
+	account.RateLimitResetAt = &resetAt
+	repo := &grokQuotaAccountRepo{
+		mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+			accountsByID: map[int64]*Account{account.ID: account},
+		},
+	}
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"X-Ratelimit-Limit-Requests":     []string{"10"},
+			"X-Ratelimit-Remaining-Requests": []string{"7"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"id":"resp_probe"}`)),
+	}}
+	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream, nil)
+
+	result, err := svc.ProbeUsageForQuotaRecovery(context.Background(), account.ID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Snapshot)
+	require.False(t, result.Persisted)
+	require.Zero(t, repo.updateCalls)
+	require.Zero(t, repo.rateLimitedCalls)
+	require.Zero(t, repo.recoveryClearCalls)
+}
+
 func TestGrokQuotaServiceProbeUsageIgnoresAccountGrokMapping(t *testing.T) {
 	t.Parallel()
 

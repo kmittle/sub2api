@@ -1035,6 +1035,25 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 			}
 		}
 	}
+	// The four-hour recovery runner persists the same UsageInfo shape so every
+	// application instance can render the refreshed balance, not only the leader
+	// that performed the probe. Use it as a bounded warm cache; normal live
+	// refresh resumes after the regular in-memory TTL.
+	if persisted := antigravityUsageSnapshotFromExtra(account); persisted != nil && persisted.UpdatedAt != nil {
+		now := time.Now()
+		if shouldUsePersistedAntigravityUsageSnapshot(persisted, now) {
+			recalcAntigravityRemainingSeconds(persisted)
+			cachedAt := persisted.UpdatedAt.UTC()
+			if cachedAt.After(now) {
+				cachedAt = now
+			}
+			s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
+				usageInfo: persisted,
+				timestamp: cachedAt,
+			})
+			return persisted, nil
+		}
+	}
 
 	// 2. singleflight 防止并发击穿
 	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
@@ -1272,6 +1291,17 @@ func antigravityCacheTTL(info *UsageInfo) time.Duration {
 		return antigravityErrorTTL
 	}
 	return apiCacheTTL
+}
+
+func shouldUsePersistedAntigravityUsageSnapshot(info *UsageInfo, now time.Time) bool {
+	if info == nil || info.UpdatedAt == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	age := now.Sub(*info.UpdatedAt)
+	return age >= -time.Minute && age < antigravityCacheTTL(info)
 }
 
 // buildAntigravityDegradedUsage 从 FetchQuota 错误构建降级 UsageInfo

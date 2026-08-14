@@ -176,9 +176,10 @@ func (s *OpenAIGatewayService) openAIAccountRuntimeBlockLock(accountID int64) *s
 	return mu
 }
 
-func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, _ string) (uint64, bool) {
+func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, until time.Time, reason string) (uint64, bool) {
 	generation := s.openaiAccountRuntimeBlockSequence.Add(1)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, generation)
+	reason = strings.TrimSpace(reason)
 	now := time.Now()
 	blockUntil := until
 	if blockUntil.IsZero() || !blockUntil.After(now) {
@@ -190,6 +191,7 @@ func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, un
 		if !loaded {
 			actual, stored := s.openaiAccountRuntimeBlockUntil.LoadOrStore(account.ID, blockUntil)
 			if !stored {
+				s.openaiAccountRuntimeBlockReason.Store(account.ID, reason)
 				return generation, true
 			}
 			current = actual
@@ -198,6 +200,7 @@ func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, un
 		currentUntil, ok := current.(time.Time)
 		if !ok || currentUntil.IsZero() {
 			if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+				s.openaiAccountRuntimeBlockReason.Store(account.ID, reason)
 				return generation, true
 			}
 			continue
@@ -206,6 +209,7 @@ func (s *OpenAIGatewayService) blockAccountSchedulingLocked(account *Account, un
 			return generation, false
 		}
 		if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+			s.openaiAccountRuntimeBlockReason.Store(account.ID, reason)
 			return generation, true
 		}
 	}
@@ -219,7 +223,76 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockReason.Delete(accountID)
 	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+}
+
+func (s *OpenAIGatewayService) SnapshotQuotaRecoveryRuntimeBlock(accountID int64) (QuotaRecoveryRuntimeBlockSnapshot, bool) {
+	if s == nil || accountID <= 0 {
+		return QuotaRecoveryRuntimeBlockSnapshot{}, false
+	}
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	untilValue, ok := s.openaiAccountRuntimeBlockUntil.Load(accountID)
+	until, validUntil := untilValue.(time.Time)
+	if !ok || !validUntil || until.IsZero() || !time.Now().Before(until) {
+		if ok {
+			s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+			s.openaiAccountRuntimeBlockReason.Delete(accountID)
+			s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+		}
+		return QuotaRecoveryRuntimeBlockSnapshot{}, false
+	}
+	generationValue, hasGeneration := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	generation, validGeneration := generationValue.(uint64)
+	reasonValue, hasReason := s.openaiAccountRuntimeBlockReason.Load(accountID)
+	reason, validReason := reasonValue.(string)
+	if !hasGeneration || !validGeneration || !hasReason || !validReason {
+		return QuotaRecoveryRuntimeBlockSnapshot{}, false
+	}
+	return QuotaRecoveryRuntimeBlockSnapshot{Generation: generation, Until: until, Reason: reason}, true
+}
+
+func (s *OpenAIGatewayService) ClearQuotaRecoveryRuntimeBlock(
+	accountID int64,
+	expected QuotaRecoveryRuntimeBlockSnapshot,
+	clearGlobalRateLimit bool,
+	clearThresholdBlock bool,
+) bool {
+	if s == nil || accountID <= 0 || expected.Generation == 0 || expected.Until.IsZero() {
+		return false
+	}
+	reasonAllowed := (clearGlobalRateLimit && (expected.Reason == "429" || expected.Reason == "429_fallback")) ||
+		(clearThresholdBlock && expected.Reason == "account_scheduling_threshold")
+	if !reasonAllowed {
+		return false
+	}
+
+	mu := s.openAIAccountRuntimeBlockLock(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	generationValue, ok := s.openaiAccountRuntimeBlockGeneration.Load(accountID)
+	generation, validGeneration := generationValue.(uint64)
+	if !ok || !validGeneration || generation != expected.Generation {
+		return false
+	}
+	untilValue, ok := s.openaiAccountRuntimeBlockUntil.Load(accountID)
+	until, validUntil := untilValue.(time.Time)
+	if !ok || !validUntil || !until.Equal(expected.Until) {
+		return false
+	}
+	reasonValue, ok := s.openaiAccountRuntimeBlockReason.Load(accountID)
+	reason, validReason := reasonValue.(string)
+	if !ok || !validReason || reason != expected.Reason {
+		return false
+	}
+
+	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	s.openaiAccountRuntimeBlockReason.Delete(accountID)
+	s.openaiAccountRuntimeBlockGeneration.Store(accountID, s.openaiAccountRuntimeBlockSequence.Add(1))
+	return true
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
@@ -236,6 +309,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	cooldownUntil, ok := value.(time.Time)
 	if !ok || cooldownUntil.IsZero() {
 		s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+		s.openaiAccountRuntimeBlockReason.Delete(account.ID)
 		s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 		return false
 	}
@@ -243,6 +317,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 		return true
 	}
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+	s.openaiAccountRuntimeBlockReason.Delete(account.ID)
 	s.openaiAccountRuntimeBlockGeneration.Store(account.ID, s.openaiAccountRuntimeBlockSequence.Add(1))
 	return false
 }

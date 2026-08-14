@@ -139,12 +139,21 @@ func grokBillingHasAuthoritativeQuota(billing *xai.BillingSummary) bool {
 
 func (s *GrokQuotaService) ProbeUsage(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
 	return s.runProbeFlight(ctx, "active:"+strconv.FormatInt(accountID, 10), func(sharedCtx context.Context) (*GrokQuotaProbeResult, error) {
-		return s.probeUsage(sharedCtx, accountID)
+		return s.probeUsage(sharedCtx, accountID, true)
 	})
 }
 
-func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
-	account, token, proxyURL, err := s.prepareProbe(ctx, accountID)
+// ProbeUsageForQuotaRecovery performs the active callability probe without
+// mutating account state. The recovery repository persists the returned
+// snapshot and clears the observed block in one identity-checked mutation.
+func (s *GrokQuotaService) ProbeUsageForQuotaRecovery(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
+	return s.runProbeFlight(ctx, "active:quota-recovery:"+strconv.FormatInt(accountID, 10), func(sharedCtx context.Context) (*GrokQuotaProbeResult, error) {
+		return s.probeUsage(sharedCtx, accountID, false)
+	})
+}
+
+func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64, persist bool) (*GrokQuotaProbeResult, error) {
+	account, token, proxyURL, err := s.prepareProbe(ctx, accountID, !persist)
 	if err != nil {
 		return nil, err
 	}
@@ -195,16 +204,18 @@ func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64) (*Gr
 	persistErr := error(nil)
 	persisted := false
 	shouldPersist := resp.StatusCode < 400 || resp.StatusCode == http.StatusTooManyRequests
-	if shouldPersist && (snapshot.HeadersObserved || resp.StatusCode == http.StatusOK) {
+	if persist && shouldPersist && (snapshot.HeadersObserved || resp.StatusCode == http.StatusOK) {
 		persistErr = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 			grokQuotaSnapshotExtraKey: snapshot,
 		})
 		persisted = persistErr == nil
 	}
-	if limited {
-		persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
-	} else if isSuccessfulGrokRateLimitRecovery(account, snapshot) {
-		clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
+	if persist {
+		if limited {
+			persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
+		} else if isSuccessfulGrokRateLimitRecovery(account, snapshot) {
+			clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
+		}
 	}
 
 	result := &GrokQuotaProbeResult{
@@ -245,7 +256,15 @@ func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64) (*Gr
 // use this method so opening the account list never consumes model quota.
 func (s *GrokQuotaService) ProbeBilling(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
 	return s.runProbeFlight(ctx, "billing:"+strconv.FormatInt(accountID, 10), func(sharedCtx context.Context) (*GrokQuotaProbeResult, error) {
-		return s.probeBilling(sharedCtx, accountID)
+		return s.probeBilling(sharedCtx, accountID, true)
+	})
+}
+
+// ProbeBillingForQuotaRecovery performs the same model-free billing requests,
+// but leaves persistence to the recovery repository's identity CAS.
+func (s *GrokQuotaService) ProbeBillingForQuotaRecovery(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
+	return s.runProbeFlight(ctx, "billing:quota-recovery:"+strconv.FormatInt(accountID, 10), func(sharedCtx context.Context) (*GrokQuotaProbeResult, error) {
+		return s.probeBilling(sharedCtx, accountID, false)
 	})
 }
 
@@ -266,8 +285,8 @@ func (s *GrokQuotaService) ProbeMediaEligibility(ctx context.Context, accountID 
 	return eligible, reason, nil
 }
 
-func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error) {
-	account, token, proxyURL, err := s.prepareProbe(ctx, accountID)
+func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64, persist bool) (*GrokQuotaProbeResult, error) {
+	account, token, proxyURL, err := s.prepareProbe(ctx, accountID, !persist)
 	if err != nil {
 		return nil, err
 	}
@@ -304,8 +323,10 @@ func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*
 		billing.WeeklyStatusCode = weekly.status
 		billing.MonthlyStatusCode = monthly.status
 		billing = xai.StampBillingSummary(billing, preferBillingObservationStatus(weekly.status, monthly.status), "billing_probe")
-		if persistErr := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{grokBillingExtraKey: billing}); persistErr != nil {
-			slog.Warn("grok_billing_failure_persist_failed", "account_id", account.ID, "error", persistErr)
+		if persist {
+			if persistErr := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{grokBillingExtraKey: billing}); persistErr != nil {
+				slog.Warn("grok_billing_failure_persist_failed", "account_id", account.ID, "error", persistErr)
+			}
 		}
 		return nil, probeErr
 	}
@@ -314,11 +335,14 @@ func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*
 	billing.WeeklyStatusCode = weekly.status
 	billing.MonthlyStatusCode = monthly.status
 	billing = xai.StampBillingSummary(billing, statusCode, "billing_probe")
-	persistErr := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-		grokBillingExtraKey: billing,
-	})
-	if persistErr != nil {
-		slog.Warn("grok_billing_persist_failed", "account_id", account.ID, "error", persistErr)
+	var persistErr error
+	if persist {
+		persistErr = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			grokBillingExtraKey: billing,
+		})
+		if persistErr != nil {
+			slog.Warn("grok_billing_persist_failed", "account_id", account.ID, "error", persistErr)
+		}
 	}
 	now := time.Now().UTC()
 	localUsage24h, localUsage7d, localUsageMonthly := grokLocalUsageForQuota(ctx, s.usageLogRepo, account.ID, billing, now)
@@ -330,7 +354,7 @@ func (s *GrokQuotaService) probeBilling(ctx context.Context, accountID int64) (*
 		LocalUsageMonthly: localUsageMonthly,
 		StatusCode:        statusCode,
 		FetchedAt:         now.Unix(),
-		Persisted:         persistErr == nil,
+		Persisted:         persist && persistErr == nil,
 	}, nil
 }
 
@@ -493,7 +517,7 @@ func (s *GrokQuotaService) ResetQuota(ctx context.Context, accountID int64) (*Gr
 	return nil, infraerrors.New(http.StatusNotImplemented, "GROK_QUOTA_RESET_UNSUPPORTED", "xAI does not expose a Grok subscription quota reset endpoint for OAuth accounts")
 }
 
-func (s *GrokQuotaService) prepareProbe(ctx context.Context, accountID int64) (*Account, string, string, error) {
+func (s *GrokQuotaService) prepareProbe(ctx context.Context, accountID int64, allowSchedulingBlock bool) (*Account, string, string, error) {
 	if s == nil || s.tokenProvider == nil || s.httpUpstream == nil {
 		return nil, "", "", infraerrors.New(http.StatusInternalServerError, "GROK_QUOTA_NOT_CONFIGURED", "grok quota service is not configured")
 	}
@@ -503,7 +527,12 @@ func (s *GrokQuotaService) prepareProbe(ctx context.Context, accountID int64) (*
 	}
 	proxyURL := s.resolveProxyURL(ctx, account)
 
-	token, err := s.tokenProvider.GetAccessToken(ctx, account)
+	var token string
+	if allowSchedulingBlock {
+		token, err = s.tokenProvider.GetAccessTokenForManualTest(ctx, account)
+	} else {
+		token, err = s.tokenProvider.GetAccessToken(ctx, account)
+	}
 	if err != nil {
 		return nil, "", "", infraerrors.Newf(http.StatusBadGateway, "GROK_QUOTA_TOKEN_UNAVAILABLE", "failed to acquire access token: %v", err)
 	}

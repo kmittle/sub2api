@@ -33,6 +33,30 @@ var tempUnschedSetScript = redis.NewScript(`
 	return 1
 `)
 
+var tempUnschedDeleteIfMatchScript = redis.NewScript(`
+	local key = KEYS[1]
+	local existing = redis.call('GET', key)
+	if not existing then
+		return 0
+	end
+	local ok, state = pcall(cjson.decode, existing)
+	if not ok or not state then
+		return 0
+	end
+	if tonumber(state.until_unix or 0) ~= tonumber(ARGV[1]) or
+		tonumber(state.triggered_at_unix or 0) ~= tonumber(ARGV[2]) or
+		tonumber(state.status_code or 0) ~= tonumber(ARGV[3]) or
+		tostring(state.matched_keyword or '') ~= ARGV[4] or
+		tonumber(state.rule_index or 0) ~= tonumber(ARGV[5]) or
+		tostring(state.error_message or '') ~= ARGV[6] or
+		tonumber(state.trigger_count or 0) ~= tonumber(ARGV[7]) or
+		tonumber(state.trigger_threshold or 0) ~= tonumber(ARGV[8]) or
+		tonumber(state.trigger_window_minutes or 0) ~= tonumber(ARGV[9]) then
+		return 0
+	end
+	return redis.call('DEL', key)
+`)
+
 type tempUnschedCache struct {
 	rdb *redis.Client
 }
@@ -89,3 +113,32 @@ func (c *tempUnschedCache) DeleteTempUnsched(ctx context.Context, accountID int6
 	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
 	return c.rdb.Del(ctx, key).Err()
 }
+
+// DeleteTempUnschedIfMatch removes only the exact state observed before a
+// quota probe. A concurrently written temporary block is left untouched.
+func (c *tempUnschedCache) DeleteTempUnschedIfMatch(ctx context.Context, accountID int64, expected *service.TempUnschedState) (bool, error) {
+	if expected == nil {
+		return false, nil
+	}
+	key := fmt.Sprintf("%s%d", tempUnschedPrefix, accountID)
+	deleted, err := tempUnschedDeleteIfMatchScript.Run(
+		ctx,
+		c.rdb,
+		[]string{key},
+		expected.UntilUnix,
+		expected.TriggeredAtUnix,
+		expected.StatusCode,
+		expected.MatchedKeyword,
+		expected.RuleIndex,
+		expected.ErrorMessage,
+		expected.TriggerCount,
+		expected.TriggerThreshold,
+		expected.TriggerWindowMinutes,
+	).Int()
+	if err != nil {
+		return false, err
+	}
+	return deleted == 1, nil
+}
+
+var _ service.QuotaRecoveryTempUnschedCache = (*tempUnschedCache)(nil)
