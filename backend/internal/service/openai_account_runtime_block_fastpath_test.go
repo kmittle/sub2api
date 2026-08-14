@@ -410,14 +410,14 @@ func TestOpenAIRuntimeBlock_QuotaRecoveryClearRequiresExactQuotaSnapshot(t *test
 	// Even a shorter non-quota block advances ownership. It must prevent an
 	// older quota probe from clearing the effective runtime block.
 	svc.BlockAccountScheduling(account, time.Now().Add(30*time.Second), "oauth_401")
-	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, true, false))
+	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, true, false, false))
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 
 	current, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
 	require.True(t, ok)
 	require.Equal(t, "429", current.Reason, "a shorter event must not relabel the effective longer block")
-	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, current, false, true))
-	require.True(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, current, true, false))
+	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, current, false, true, false))
+	require.True(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, current, true, false, false))
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
@@ -429,8 +429,27 @@ func TestOpenAIRuntimeBlock_QuotaRecoveryNeverClearsNonQuotaReason(t *testing.T)
 	observed, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
 	require.True(t, ok)
 	require.Equal(t, "privacy_not_set", observed.Reason)
-	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, true, true))
+	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, true, true, false))
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+func TestOpenAIRuntimeBlock_QuotaErrorClearRequiresExplicitFlag(t *testing.T) {
+	for _, reason := range []string{"auth_error", "upstream_disable"} {
+		t.Run(reason, func(t *testing.T) {
+			svc := &OpenAIGatewayService{}
+			account := &Account{ID: 50, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+			svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), reason)
+			observed, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
+			require.True(t, ok)
+			require.Equal(t, reason, observed.Reason)
+
+			require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, false))
+			require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			require.True(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, true))
+			require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+		})
+	}
 }
 
 func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {

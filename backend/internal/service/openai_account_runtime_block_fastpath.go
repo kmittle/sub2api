@@ -260,12 +260,14 @@ func (s *OpenAIGatewayService) ClearQuotaRecoveryRuntimeBlock(
 	expected QuotaRecoveryRuntimeBlockSnapshot,
 	clearGlobalRateLimit bool,
 	clearThresholdBlock bool,
+	clearQuotaError bool,
 ) bool {
 	if s == nil || accountID <= 0 || expected.Generation == 0 || expected.Until.IsZero() {
 		return false
 	}
 	reasonAllowed := (clearGlobalRateLimit && (expected.Reason == "429" || expected.Reason == "429_fallback")) ||
-		(clearThresholdBlock && expected.Reason == "account_scheduling_threshold")
+		(clearThresholdBlock && expected.Reason == "account_scheduling_threshold") ||
+		(clearQuotaError && (expected.Reason == "auth_error" || expected.Reason == "upstream_disable"))
 	if !reasonAllowed {
 		return false
 	}

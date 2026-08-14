@@ -83,3 +83,22 @@ func TestApplyQuotaRecoveryMutationRejectsUnsafeClearRequestsBeforeSQL(t *testin
 	require.ErrorContains(t, err, "non-threshold")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestApplyQuotaRecoveryMutationRejectsNonBalanceAccountErrorBeforeSQL(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := newAccountRepositoryWithSQL(nil, db, nil)
+	account := &service.Account{
+		ID: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Status: service.StatusError, ErrorMessage: "Authentication failed (401): invalid API key",
+	}
+
+	_, err = repo.ApplyQuotaRecoveryMutation(context.Background(), service.QuotaRecoveryMutation{
+		Target: account, Identity: account, ClearQuotaError: true,
+	})
+	require.ErrorContains(t, err, "non-balance")
+	require.NoError(t, mock.ExpectationsWereMet())
+}

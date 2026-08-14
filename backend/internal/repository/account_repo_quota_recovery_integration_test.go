@@ -216,6 +216,65 @@ func TestApplyQuotaRecoveryMutationCASMissesConcurrentAvailabilityPolicyChange(t
 	require.NotContains(t, got.Extra, "antigravity_usage_snapshot")
 }
 
+func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	cache := &schedulerCacheRecorder{}
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, cache)
+
+	createBalanceError := func(name, errorMessage string) *service.Account {
+		account := mustCreateAccount(t, tx.Client(), &service.Account{
+			Name: name, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+			Status: service.StatusError, ErrorMessage: errorMessage,
+			Credentials: map[string]any{"api_key": "sk-test"},
+		})
+		_, err := tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE WHERE id = $1", account.ID)
+		require.NoError(t, err)
+		observed, err := repo.GetByID(ctx, account.ID)
+		require.NoError(t, err)
+		return observed
+	}
+
+	recoverable := createBalanceError(
+		"quota-recovery-balance-error",
+		service.QuotaRecoveryPaymentErrorPrefix+" insufficient balance",
+	)
+	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
+		Target: recoverable, Identity: recoverable, ClearQuotaError: true,
+	})
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	got, err := repo.GetByID(ctx, recoverable.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusActive, got.Status)
+	require.True(t, got.Schedulable)
+	require.Empty(t, got.ErrorMessage)
+	require.Len(t, cache.setAccounts, 1)
+	require.Equal(t, recoverable.ID, cache.setAccounts[0].ID)
+
+	stale := createBalanceError(
+		"quota-recovery-balance-error-cas",
+		service.QuotaRecoveryCreditBalanceErrorPrefix+" first generation",
+	)
+	newError := service.QuotaRecoveryCreditBalanceErrorPrefix + " newer generation"
+	_, err = tx.ExecContext(ctx, "UPDATE accounts SET error_message = $2, updated_at = NOW() WHERE id = $1", stale.ID, newError)
+	require.NoError(t, err)
+
+	applied, err = repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
+		Target: stale, Identity: stale, ClearQuotaError: true,
+	})
+	require.NoError(t, err)
+	require.False(t, applied)
+
+	got, err = repo.GetByID(ctx, stale.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusError, got.Status)
+	require.False(t, got.Schedulable)
+	require.Equal(t, newError, got.ErrorMessage)
+	require.Len(t, cache.setAccounts, 1, "a CAS miss must not refresh the scheduler snapshot")
+}
+
 func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t *testing.T) {
 	ctx := context.Background()
 	tx := testEntTx(t)
@@ -252,6 +311,16 @@ func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t 
 		create("quota-scan-bedrock", service.PlatformAnthropic, service.AccountTypeBedrock, map[string]any{"auth_mode": "apikey", "api_key": "key"}, true, true),
 		create("quota-scan-antigravity-upstream", service.PlatformAntigravity, service.AccountTypeUpstream, map[string]any{"base_url": "https://relay.example.com", "api_key": "key"}, true, true),
 	}
+	paymentError := create("quota-scan-payment-error", service.PlatformOpenAI, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, false)
+	_, err := tx.ExecContext(ctx, "UPDATE accounts SET status = $2, error_message = $3 WHERE id = $1",
+		paymentError.ID, service.StatusError, service.QuotaRecoveryPaymentErrorPrefix+" insufficient balance")
+	require.NoError(t, err)
+	want = append(want, paymentError)
+
+	authError := create("quota-scan-auth-error", service.PlatformOpenAI, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, false)
+	_, err = tx.ExecContext(ctx, "UPDATE accounts SET status = $2, error_message = $3 WHERE id = $1",
+		authError.ID, service.StatusError, "Authentication failed (401): invalid API key")
+	require.NoError(t, err)
 	setupUnblocked := create("quota-scan-setup-unblocked", service.PlatformAnthropic, service.AccountTypeSetupToken, map[string]any{"access_token": "setup"}, true, false)
 	geminiUnblocked := create("quota-scan-gemini-unblocked", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, true, false)
 	manualDisabled := create("quota-scan-manual-disabled", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, true)
@@ -266,7 +335,7 @@ func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t 
 	for _, account := range want {
 		require.Contains(t, gotIDs, account.ID, account.Name)
 	}
-	for _, account := range []*service.Account{setupUnblocked, geminiUnblocked, manualDisabled} {
+	for _, account := range []*service.Account{setupUnblocked, geminiUnblocked, manualDisabled, authError} {
 		require.NotContains(t, gotIDs, account.ID, account.Name)
 	}
 }
