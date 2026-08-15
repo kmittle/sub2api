@@ -171,7 +171,8 @@ func TestMessagesCrossPlatformFallback_CurrentSelectionPolicyErrorWinsAfterUpstr
 	)
 
 	require.False(t, called, "the current channel pricing restriction must prevent fallback")
-	require.Equal(t, http.StatusServiceUnavailable, writer.Code)
+	// The previous upstream 503 still follows the shared client-facing mapping.
+	require.Equal(t, http.StatusBadGateway, writer.Code)
 }
 
 func TestGatewayMessagesCrossPlatformFallback_ResetsCompositeRoutingContext(t *testing.T) {

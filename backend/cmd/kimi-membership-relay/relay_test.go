@@ -69,7 +69,8 @@ func TestNormalizeKimiChatRequest(t *testing.T) {
 				require.NotContains(t, got, "thinking")
 				return
 			}
-			thinking := got["thinking"].(map[string]any)
+			thinking, ok := got["thinking"].(map[string]any)
+			require.True(t, ok)
 			require.Equal(t, "enabled", thinking["type"])
 			require.Equal(t, tt.wantEffort, thinking["effort"])
 			if tt.name == "native thinking" {
@@ -113,7 +114,9 @@ func TestRelayRequiresSecretAndForcesK3Effort(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(upstreamBody, &got))
 	require.Equal(t, "k3", got["model"])
-	require.Equal(t, "max", got["thinking"].(map[string]any)["effort"])
+	thinking, ok := got["thinking"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "max", thinking["effort"])
 	provider.mu.Lock()
 	require.Equal(t, []bool{false}, provider.forceCalls)
 	provider.mu.Unlock()

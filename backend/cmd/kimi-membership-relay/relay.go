@@ -151,7 +151,7 @@ func (s *relayServer) forward(w http.ResponseWriter, inbound *http.Request, meth
 			return http.StatusBadGateway, err
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -269,7 +269,7 @@ func parseKimiEffort(raw json.RawMessage) (string, bool, error) {
 var errRequestTooLarge = errors.New("request body is too large")
 
 func readRequestBody(body io.ReadCloser, limit int64) ([]byte, error) {
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, err

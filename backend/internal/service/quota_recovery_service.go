@@ -422,7 +422,7 @@ func (s *QuotaRecoveryService) refreshAnthropic(ctx context.Context, account *Ac
 	ctx = s.captureRuntimeBlock(ctx, account)
 	result := quotaRecoveryAccountResult{probes: 1}
 	if s.usageService == nil || s.usageService.usageFetcher == nil {
-		result.err = errors.New("Anthropic usage fetcher is not configured")
+		result.err = errors.New("anthropic usage fetcher is not configured")
 		return result
 	}
 	resp, err := s.usageService.fetchOAuthUsageRaw(ctx, account)
@@ -605,7 +605,7 @@ func (s *QuotaRecoveryService) refreshAntigravity(ctx context.Context, account *
 	result := quotaRecoveryAccountResult{probes: 1}
 	if s.usageService == nil || s.usageService.antigravityQuotaFetcher == nil ||
 		!s.usageService.antigravityQuotaFetcher.CanFetch(account) {
-		result.err = errors.New("Antigravity quota fetcher is not configured")
+		result.err = errors.New("antigravity quota fetcher is not configured")
 		return result
 	}
 	proxyURL := s.usageService.antigravityQuotaFetcher.GetProxyURL(ctx, account)
@@ -615,7 +615,7 @@ func (s *QuotaRecoveryService) refreshAntigravity(ctx context.Context, account *
 		return result
 	}
 	if fetched == nil || fetched.UsageInfo == nil {
-		result.err = errors.New("Antigravity returned no quota snapshot")
+		result.err = errors.New("antigravity returned no quota snapshot")
 		return result
 	}
 	updates := map[string]any{QuotaRecoveryAntigravityUsageSnapshotExtraKey: fetched.UsageInfo}
@@ -717,7 +717,7 @@ func (s *QuotaRecoveryService) refreshGrok(ctx context.Context, account *Account
 	ctx = s.captureRuntimeBlock(ctx, account)
 	result := quotaRecoveryAccountResult{probes: 1}
 	if s.usageService == nil || s.usageService.grokQuotaService == nil {
-		result.err = errors.New("Grok quota service is not configured")
+		result.err = errors.New("grok quota service is not configured")
 		return result
 	}
 	billing, err := s.usageService.grokQuotaService.ProbeBillingForQuotaRecovery(ctx, account.ID)
@@ -752,7 +752,7 @@ func (s *QuotaRecoveryService) refreshGrok(ctx context.Context, account *Account
 	latest, err := s.repo.GetByID(ctx, account.ID)
 	if err != nil || latest == nil {
 		if err == nil {
-			err = errors.New("Grok account was not found after quota probe")
+			err = errors.New("grok account was not found after quota probe")
 		}
 		result.err = err
 		return result

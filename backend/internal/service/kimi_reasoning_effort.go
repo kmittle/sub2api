@@ -109,10 +109,6 @@ func mapKimiReasoningEffort(raw string) string {
 	return mapKimiOpenAIReasoningEffort(raw)
 }
 
-func normalizeKimiReasoningEffortBody(body []byte, model string) ([]byte, bool) {
-	return normalizeKimiOpenAIReasoningEffortBody(body, model, "")
-}
-
 func normalizeKimiOpenAIReasoningEffortBody(body []byte, model, sourceModel string) ([]byte, bool) {
 	if !isKimiModel(model) || len(body) == 0 {
 		return body, false
@@ -155,17 +151,4 @@ func extractKimiNativeReasoningEffortFromBody(body []byte) *string {
 		}
 	}
 	return nil
-}
-
-// normalizeKimiAnthropicEffort maps output_config.effort before the Anthropic
-// bridge converts it to Responses or Chat Completions. The returned value is
-// a Kimi-native level and is also suitable for usage metadata.
-func normalizeKimiAnthropicEffort(raw, model string) string {
-	if !isKimiModel(model) {
-		return raw
-	}
-	if mapped := mapKimiAnthropicEffort(raw); mapped != "" {
-		return mapped
-	}
-	return raw
 }

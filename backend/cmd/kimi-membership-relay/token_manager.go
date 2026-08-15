@@ -130,7 +130,7 @@ func (m *tokenManager) load() (credentialState, error) {
 	if err != nil {
 		return credentialState{}, fmt.Errorf("open KIMI OAuth credentials: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(file, credentialFileLimit+1))
 	if err != nil {
