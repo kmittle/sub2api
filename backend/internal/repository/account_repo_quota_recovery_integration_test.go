@@ -221,13 +221,23 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	tx := testEntTx(t)
 	cache := &schedulerCacheRecorder{}
 	repo := newAccountRepositoryWithSQL(tx.Client(), tx, cache)
+	group := mustCreateGroup(t, tx.Client(), &service.Group{
+		Name:     "quota-recovery-original-group",
+		Platform: service.PlatformOpenAI,
+	})
 
 	createBalanceError := func(name, errorMessage string) *service.Account {
 		account := mustCreateAccount(t, tx.Client(), &service.Account{
 			Name: name, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
 			Status: service.StatusError, ErrorMessage: errorMessage,
-			Credentials: map[string]any{"api_key": "sk-test"},
-			Extra:       map[string]any{"operator_setting": "keep"},
+			Credentials: map[string]any{
+				"api_key":  "sk-test",
+				"base_url": "http://kimi-membership-relay:8090/v1",
+				"model_mapping": map[string]any{
+					"gpt-5.6-sol": "k3",
+				},
+			},
+			Extra: map[string]any{"operator_setting": "keep"},
 		})
 		_, err := tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE WHERE id = $1", account.ID)
 		require.NoError(t, err)
@@ -240,6 +250,12 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 		"quota-recovery-balance-error",
 		service.QuotaRecoveryPaymentErrorPrefix+" insufficient balance",
 	)
+	mustBindAccountToGroup(t, tx.Client(), recoverable.ID, group.ID, 23)
+	recoverable, err := repo.GetByID(ctx, recoverable.ID)
+	require.NoError(t, err)
+	require.Equal(t, []int64{group.ID}, recoverable.GroupIDs)
+	originalCredentials := recoverable.Credentials
+
 	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
 		Target: recoverable, Identity: recoverable, ClearQuotaError: true,
 	})
@@ -252,8 +268,17 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	require.True(t, got.Schedulable)
 	require.Empty(t, got.ErrorMessage)
 	require.Equal(t, "keep", got.Extra["operator_setting"], "an empty model-limit key set must preserve existing extra")
+	require.Equal(t, originalCredentials, got.Credentials, "quota recovery must not rewrite model mapping or upstream identity")
+	require.Equal(t, []int64{group.ID}, got.GroupIDs, "quota recovery must preserve the original scheduling groups")
+	var groupPriority int
+	require.NoError(t, scanSingleRow(ctx, tx,
+		"SELECT priority FROM account_groups WHERE account_id = $1 AND group_id = $2",
+		[]any{recoverable.ID, group.ID}, &groupPriority))
+	require.Equal(t, 23, groupPriority)
 	require.Len(t, cache.setAccounts, 1)
 	require.Equal(t, recoverable.ID, cache.setAccounts[0].ID)
+	require.Equal(t, []int64{group.ID}, cache.setAccounts[0].GroupIDs, "the immediate scheduler refresh must carry the original groups")
+	require.Equal(t, originalCredentials, cache.setAccounts[0].Credentials)
 
 	stale := createBalanceError(
 		"quota-recovery-balance-error-cas",

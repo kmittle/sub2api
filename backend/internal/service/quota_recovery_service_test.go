@@ -5,13 +5,18 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type quotaRecoveryRepositoryStub struct {
@@ -318,6 +323,78 @@ func TestQuotaRecoveryAPIKeySuccessClearsOnlyObservedQuotaBlocks(t *testing.T) {
 	require.Equal(t, "quota threshold", tempCache.expected[0].ErrorMessage)
 	require.Equal(t, []int64{account.ID}, blocker.cleared)
 	require.Empty(t, blocker.broadCleared)
+}
+
+func TestQuotaRecoveryKimiAPIAndMembershipRelayUseReadOnlyAPIKeyRecovery(t *testing.T) {
+	tests := []struct {
+		name          string
+		baseURL       string
+		upstreamModel string
+	}{
+		{name: "direct API", baseURL: "https://api.moonshot.ai/v1", upstreamModel: "kimi-k2.5"},
+		{name: "membership relay", baseURL: "http://kimi-membership-relay:8090/v1", upstreamModel: "k3"},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &Account{
+				ID:           int64(140 + i),
+				Platform:     PlatformOpenAI,
+				Type:         AccountTypeAPIKey,
+				Status:       StatusError,
+				Schedulable:  false,
+				ErrorMessage: QuotaRecoveryPaymentErrorPrefix + " test balance exhausted",
+				Concurrency:  1,
+				GroupIDs:     []int64{91},
+				Credentials: map[string]any{
+					"api_key":  "test-key",
+					"base_url": tt.baseURL,
+					"model_mapping": map[string]any{
+						"*": tt.upstreamModel,
+					},
+				},
+				Extra: map[string]any{openai_compat.ExtraKeyResponsesSupported: false},
+			}
+			repo := &quotaRecoveryRepositoryStub{accounts: map[int64]*Account{account.ID: account}}
+			upstreamBody := strings.Join([]string{
+				`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}`,
+				"",
+				`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				"",
+				"data: [DONE]",
+				"",
+			}, "\n")
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+			}}
+			accountTest := &AccountTestService{
+				accountRepo:  repo,
+				httpUpstream: upstream,
+				cfg: &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{
+					Enabled:           false,
+					AllowInsecureHTTP: true,
+				}}},
+			}
+			svc := NewQuotaRecoveryService(repo, nil, accountTest, nil, nil, nil, nil, nil)
+
+			result := svc.refreshConnectivity(context.Background(), account)
+
+			require.NoError(t, result.err)
+			require.Equal(t, 1, result.probes)
+			require.Equal(t, 1, result.cleared)
+			require.NotNil(t, upstream.lastReq)
+			require.Equal(t, strings.TrimSuffix(tt.baseURL, "/")+"/chat/completions", upstream.lastReq.URL.String())
+			require.Equal(t, "Bearer test-key", upstream.lastReq.Header.Get("Authorization"))
+			require.Equal(t, tt.upstreamModel, gjson.GetBytes(upstream.lastBody, "model").String())
+			_, _, _, mutations, _ := repo.snapshot()
+			require.Len(t, mutations, 1)
+			require.True(t, mutations[0].ClearQuotaError)
+			require.Equal(t, account.GroupIDs, mutations[0].Target.GroupIDs)
+			require.Equal(t, account.Credentials, mutations[0].Target.Credentials)
+		})
+	}
 }
 
 func TestQuotaRecoveryBalanceErrorSuccessRestoresOnlyObservedQuotaError(t *testing.T) {

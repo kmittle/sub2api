@@ -27,6 +27,15 @@ func (r *bulkEventAccountRepo) GetByIDs(context.Context, []int64) ([]*Account, e
 	return append([]*Account(nil), r.accounts...), nil
 }
 
+func (r *bulkEventAccountRepo) GetByID(_ context.Context, accountID int64) (*Account, error) {
+	for _, account := range r.accounts {
+		if account != nil && account.ID == accountID {
+			return account, nil
+		}
+	}
+	return nil, ErrAccountNotFound
+}
+
 type bulkEventSnapshotCache struct {
 	*batchSnapshotCache
 
@@ -111,6 +120,29 @@ func TestSchedulerBulkAccountEventScopesOpenAIRebuildToFreshPlatform(t *testing.
 	require.ElementsMatch(t, schedulerBucketsForTest([]int64{11, 12}, PlatformOpenAI), cache.capturedBuckets())
 	set, deleted := cache.accountWrites()
 	require.Equal(t, []int64{1}, set)
+	require.Empty(t, deleted)
+}
+
+func TestSchedulerAccountChangedEventReturnsRecoveredAccountToOriginalGroups(t *testing.T) {
+	cache := newBulkEventSnapshotCache()
+	recovered := &Account{
+		ID:          12,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		GroupIDs:    []int64{81, 82},
+	}
+	repo := newBulkEventAccountRepo(recovered)
+	svc := newBulkEventTestService(cache, repo)
+
+	accountID := recovered.ID
+	err := svc.handleAccountEvent(context.Background(), &accountID, nil, make(map[batchSeenKey]struct{}))
+
+	require.NoError(t, err)
+	require.ElementsMatch(t, schedulerBucketsForTest(recovered.GroupIDs, PlatformOpenAI), cache.capturedBuckets())
+	set, deleted := cache.accountWrites()
+	require.Equal(t, []int64{recovered.ID}, set)
 	require.Empty(t, deleted)
 }
 

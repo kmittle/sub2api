@@ -729,6 +729,68 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_AlphaSearchAllowsAPIKey
 	require.Equal(t, int64(38001), selection.Account.ID)
 }
 
+func TestOpenAIGatewayService_SelectAccountWithScheduler_KimiAPIAndMembershipStayInOriginalGroup(t *testing.T) {
+	tests := []struct {
+		name          string
+		baseURL       string
+		upstreamModel string
+	}{
+		{name: "direct API", baseURL: "https://api.moonshot.ai/v1", upstreamModel: "kimi-k2.5"},
+		{name: "membership relay", baseURL: "http://kimi-membership-relay:8090/v1", upstreamModel: "k3"},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetOpenAIAdvancedSchedulerSettingCacheForTest()
+			groupID := int64(10126 + i)
+			accountID := int64(38100 + i)
+			account := Account{
+				ID:          accountID,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 1,
+				GroupIDs:    []int64{groupID},
+				AccountGroups: []AccountGroup{
+					{AccountID: accountID, GroupID: groupID, Priority: 10},
+				},
+				Credentials: map[string]any{
+					"api_key":  "test-key",
+					"base_url": tt.baseURL,
+					"model_mapping": map[string]any{
+						"gpt-5.6-sol": tt.upstreamModel,
+					},
+				},
+			}
+			cfg := &config.Config{}
+			cfg.Gateway.Scheduling.LoadBatchEnabled = false
+			svc := &OpenAIGatewayService{
+				accountRepo: schedulerGroupAwareOpenAIAccountRepo{
+					schedulerTestOpenAIAccountRepo{accounts: []Account{account}},
+				},
+				cache:              &schedulerTestGatewayCache{},
+				cfg:                cfg,
+				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+			}
+
+			selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+				context.Background(), &groupID, "", "", "gpt-5.6-sol", nil,
+				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+				false, false, true,
+			)
+
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.NotNil(t, selection.Account)
+			require.Equal(t, accountID, selection.Account.ID)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+		})
+	}
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabled_AllowsGrokChatAccount(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
