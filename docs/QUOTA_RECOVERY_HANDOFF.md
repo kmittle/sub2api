@@ -10,6 +10,17 @@
 
 没有原生额度查询接口的 API Key、Setup Token、Bedrock、Vertex Service Account、Gemini 及 Upstream 凭据只做只读连通性探测，不虚构余额展示。
 
+## 原始指令（写这个文档的agent接收到的原始指令）
+
+写一个cron，每4小时检查一次sub2API的所有账号额度是否重置或者有新的额外的额度可用，总之就是账号可用了，然后刷新账号的可调度状态，并且刷新账号余额显示
+API类似，检查API是否有可调用额度，有则重置API的可调度状态，并且刷新API余额显示（我忘了sub2API是否原生就能展示API余额，如果不能就不加展示余额的功能）
+
+以上功能不一定以cron形式实现，也可以直接实现在Sub2API中，例如，使用Go语言，或者使用python脚本等，你选择最合适的实现方式
+
+之前可能已经基于cron实现过，但是可能没完成，如果你打算继续使用cron实现可以看看原来实现的进展；如果你不打算采取这个技术路线可以清除之前使用cron实现路线的dirty改动。
+
+是否完全理解？
+
 ## 当前实现状态
 
 基础实现位于提交 `1ab2c83f4122d7fd6199d30617e74e9466f0f57f`：
@@ -23,7 +34,7 @@
 - Redis 临时不可调度状态和 OpenAI 内存阻断也按观测代次条件清理，不使用宽泛删除。
 - 服务已经接入 Wire 启停生命周期，成功周期会记录 `quota_recovery_cycle_completed`。
 
-## 本分支新增修复
+余额错误恢复位于提交 `966ad85ca`：
 
 基础实现遗漏了 `RateLimitService` 通过 `SetError` 持久化的余额耗尽账号。这类账号会被写成：
 
@@ -51,7 +62,9 @@ Payment required (402): ...
 - 认证错误、entitlement 错误、人工暂停、disabled 和过期账号仍不会自动恢复。
 - OpenAI 运行时阻断清理增加显式 `clearQuotaError` 参数；仅允许在该标志下按代次清理 `auth_error` 或 `upstream_disable`。
 
-本轮修改文件：
+真实 E2E 随后发现：没有模型限流键时，`pq.Array(nil)` 会向 PostgreSQL 传入 `NULL`，导致 mutation 把账号原有 `extra` 清空。提交 `c693bcc23` 将空键集合规范化为非 nil 空切片，确保 SQL 收到空数组；repository integration 测试同时断言 `extra.operator_setting` 在余额错误恢复后仍保留。
+
+本功能主要修改文件：
 
 ```text
 backend/internal/repository/account_repo_quota_recovery.go
@@ -70,54 +83,32 @@ backend/internal/service/quota_recovery_service_test.go
 - 两条 repository SQL 已在生产 PostgreSQL 上通过 `PREPARE` / `DEALLOCATE` 语法和参数类型校验；mutation 参数覆盖到 `$43`。
 - 已静态检查 `ClearQuotaRecoveryRuntimeBlock` 的所有实现和调用点，均已同步第五个参数。
 - 已新增 service、runtime blocker、repository unit 和 repository integration 测试。
-
-## 尚未完成验证
-
-本分支新增修复尚未成功完成 Go 类型检查、测试编译或服务构建。原因是原服务器只有约 3.6 GiB RAM，相关 Go 包体积很大：
-
-- 先前测试容器曾在 800/900 MiB 和约 1.27 GiB 限额下触顶，引发宿主 memory PSI 和 Swap 压力。
-- 最后一次 `go/packages.LoadSyntax` 轻量尝试限制为 500 MiB、550 MiB memory+swap、1 CPU、无网络；约 8 秒后达到 499.8 MiB，并出现少量新增 swap-out，已立即停止。
-- 临时类型检查容器已经删除，临时 `backend/tmp_quota_typecheck.go` 也未纳入分支。
-
-因此，接手者必须把“测试已编写”和“测试已通过”区分开，不应在完成下列验证前部署。
-
-## 新服务器接手步骤
-
-所有 Go 测试、构建和 Wire 操作继续严格串行。不要同时运行 service/repository 测试，也不要让测试与构建重叠。
+- 在内存更充足的开发服务器上，最终工作树已严格串行通过：
 
 ```bash
-git fetch fork
-git switch --track fork/handoff/quota-recovery-20260815
-cd backend
-gofmt -w internal/repository/account_repo_quota_recovery.go \
-  internal/repository/account_repo_quota_recovery_integration_test.go \
-  internal/repository/account_repo_quota_recovery_test.go \
-  internal/service/openai_account_runtime_block_fastpath.go \
-  internal/service/openai_account_runtime_block_fastpath_test.go \
-  internal/service/quota_recovery_service.go \
-  internal/service/quota_recovery_service_test.go
-git diff --check
+/usr/local/bin/go test -tags=unit -p=1 ./... -count=1
+sudo -u bycao -g docker -- /usr/local/bin/go test -tags=integration -p=1 ./... -count=1
+golangci-lint run ./...  # v2.9.0, 0 issues
+/usr/local/bin/go build ./cmd/server
 ```
 
-先逐条运行本轮新增的重点测试；每条命令结束后再启动下一条：
+- 全量测试暴露了一条旧 Messages fallback 用例的错误预期：仓库既有映射会把上游 `503` 转为客户端 `502`，测试却期待 `503`。只修正了测试预期，未修改生产错误映射。
+- 为恢复 lint 基线，还机械修正了 Kimi membership relay 的 `Close` 返回值处理、测试类型断言，并删除两个已被带协议信息的新入口替代的私有未使用包装函数；Kimi 定向测试和全量测试均通过。
+- 当前分支没有修改 Wire provider 关系；基础提交已包含 `wire_gen.go`，本轮无需重新生成 Wire。
 
-```bash
-go test ./internal/service -run 'TestQuotaRecovery(BalanceError|IdentityAllowsRestore|ProbeEligibility)|TestOpenAIRuntimeBlock_QuotaErrorClear' -count=1
-go test ./internal/repository -run 'TestApplyQuotaRecoveryMutationRejectsNonBalanceAccountError' -count=1
-go test ./internal/repository -run 'TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration|TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates' -count=1
+## 真实 E2E
+
+- 本地配置由生产数据库重新脱敏导出；规范化 OAuth 到期时间、运行时代理、Kimi relay 和动态健康字段后，本地与中转站快照的 498 个静态叶子字段完全一致。
+- 真实 Kimi API 只执行过一次最小 `hi` 请求：固定 400 余额错误账号成功恢复为 `active + schedulable`，且没有写入伪造余额字段。因 API 余额有限，发现并修复 `extra` 清空问题后没有再次调用真实 Kimi API。
+- 修复后的最终确定性 E2E 使用 3 个 Codex OAuth 原生额度查询、1 个本地成功账号和 1 个本地失败账号；周期日志为：
+
+```text
+accounts_scanned=5 probes_attempted=5 snapshots_saved=3 blocks_cleared=1 errors=1
 ```
 
-然后依次扩大验证范围：
-
-```bash
-go test ./internal/service -run 'TestQuotaRecovery|TestOpenAIRuntimeBlock_QuotaRecovery|TestOpenAIRuntimeBlock_QuotaErrorClear' -count=1
-go test ./internal/repository -run 'TestQuotaRecovery|TestApplyQuotaRecoveryMutation|TestListQuotaRecoveryAccountPage' -count=1
-go test ./internal/service -count=1
-go test ./internal/repository -count=1
-go build ./cmd/server
-```
-
-当前分支没有修改 Wire provider 关系；基础提交已经包含更新后的 `wire_gen.go`，因此正常验证不需要运行完整 Wire 图分析。只有在接手开发继续修改依赖注入后才重新生成 Wire。
+- 成功账号恢复，失败账号保持原固定错误；两个本地测试账号的 `extra` 哈希在巡检前后完全一致。
+- 三个 Codex OAuth 的 5h/7d 原生快照均刷新，生产模式字段保留。
+- 认领 UTC 槽位 `2026-08-14T20:00:00Z`；同槽重启没有再次巡检，状态哈希不变。
 
 ## 重点审阅项
 
