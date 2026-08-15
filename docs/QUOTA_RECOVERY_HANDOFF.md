@@ -95,6 +95,8 @@ golangci-lint run ./...  # v2.9.0, 0 issues
 - 全量测试暴露了一条旧 Messages fallback 用例的错误预期：仓库既有映射会把上游 `503` 转为客户端 `502`，测试却期待 `503`。只修正了测试预期，未修改生产错误映射。
 - 为恢复 lint 基线，还机械修正了 Kimi membership relay 的 `Close` 返回值处理、测试类型断言，并删除两个已被带协议信息的新入口替代的私有未使用包装函数；Kimi 定向测试和全量测试均通过。
 - 当前分支没有修改 Wire provider 关系；基础提交已包含 `wire_gen.go`，本轮无需重新生成 Wire。
+- 生产镜像的默认 Dockerfile 将前端 V8 堆固定为 1536 MiB，本次 `vue-tsc` 在该上限 OOM。最终构建只使用临时 Dockerfile 将构建阶段堆提高到 4096 MiB；仓库 Dockerfile 和最终运行环境未改动。
+- Docker Hub 直连拉取基础镜像超时，最终仅通过构建参数使用 DaoCloud 镜像源；没有启用 VPN 或修改 Docker daemon/系统代理。
 
 ## 真实 E2E
 
@@ -119,18 +121,39 @@ accounts_scanned=5 probes_attempted=5 snapshots_saved=3 blocks_cleared=1 errors=
 - API Key 等没有原生余额接口的账号不得写入伪造额度快照。
 - 清理数据库状态成功后，运行时/Redis 清理仍必须是条件式操作；CAS miss 不得刷新 scheduler snapshot 或清理缓存。
 
-## 部署后验证
+## 镜像与生产部署
 
-当前生产仍运行镜像 `local/sub2api:claude-idle-20260814-r2`，健康状态正常；quota recovery 新实现尚未部署。
+- 本机构建并验证镜像 `local/sub2api:quota-recovery-20260815-f480d02c9`：
 
-完成构建和测试后，按该环境既有发布流程串行构建并替换服务。启动后检查：
+```text
+image_id=sha256:0a268217e28534bf8399998b231acd41ae3ad8bd37ff5a5875faa8b2cc8a194a
+archive_sha256=dda92d6625e71a1584d8521e02a65b604441034c67e0ce35858e2b79281ff240
+embedded_version=quota-recovery-20260815
+embedded_commit=f480d02c9
+```
 
-1. 新镜像和新容器均处于 healthy。
-2. 启动周期出现 `quota_recovery_cycle_completed`，并核对 `accounts_scanned`、`probes_attempted`、`snapshots_saved`、`blocks_cleared`、`errors`。
-3. PostgreSQL 中存在 `settings.key = 'quota_recovery_last_utc_slot'`，值为当前 UTC 四小时槽位。
-4. 选择一个明确由 400/402 余额错误产生的测试账号，确认失败探测不改变状态，成功探测才恢复 `active + schedulable`。
-5. Anthropic/OpenAI/Antigravity/Grok OAuth 的原生额度展示已刷新；API Key 账号没有新增虚构余额。
-6. 观察宿主 RAM、Swap、memory PSI、服务日志和所有生产容器健康状态。
+- 中转站只执行 Git fast-forward、镜像归档校验、`docker load` 和 Compose 重建，没有运行 Go、Node 或 Docker build。
+- Compose 保持原有五层叠加：`docker-compose.yml`、`docker-compose.server.yml`、`docker-compose.network.yml`、`docker-compose.composite.yml`、`docker-compose.kimi-membership.yml`。
+- `/home/ubuntu/sub2api/deploy/.env` 的唯一 `SUB2API_CUSTOM_IMAGE` 已持久化为新镜像；其余服务及固定镜像 digest 未改变。
+- 旧镜像 `local/sub2api:claude-idle-20260814-r2`（ID `26973eacd465`）仍保留，可直接回滚。
+
+## 生产验证
+
+- 上线前候选统计只有 3 个 OpenAI OAuth；没有 Kimi/API Key 候选，因此部署和受控验证均未调用 Kimi API。
+- 首次周期发现账号 1 的旧 Codex access token 已被 OpenAI 作废；另外两个账号正常刷新。相同的新凭据在本地 OpenAI 通道验证成功后，生产通道仍拒绝该 access token，因此最终在生产 Mihomo 出口内强制走既有 refresh-token 流程，未改变代理拓扑。
+- 凭据同步和到期时间调整均使用账号身份、状态及完整凭据哈希 CAS；敏感 JSON 只经 SSH 管道传输、不落盘、不回显。对应 scheduler outbox 均已消费，Redis 快照已更新。
+- 最终生产周期：
+
+```text
+slot=2026-08-15T00:00:00Z
+accounts_scanned=3 probes_attempted=3 snapshots_saved=3 blocks_cleared=0 errors=0
+```
+
+- 三个 Codex OAuth 均有原生额度快照；一个尚未恢复的限流代次继续保留，没有错误清理或越权恢复。
+- 普通同槽重启已验证不会重复执行；受控验证期间曾精确删除槽位以主动复测，最终槽位已恢复为 `2026-08-15T00:00:00Z`，之后不再人工重置。
+- `sub2api`、Mihomo、PostgreSQL、Redis、Kimi membership relay 和 Caddy 全部 healthy；容器内及公网 `https://kmittle.cloud/health` 均返回 `{"status":"ok"}`。
+- 最终宿主指标：可用内存约 2620 MiB，Swap 使用 129 MiB，memory PSI `some/full` 的 10/60/300 秒均为 `0.00`；`sub2api` 内存约 82 MiB。
+- 最终日志无 quota recovery、scheduler、panic 或 fatal 错误。既有 URL allowlist/trusted proxy/CORS 配置告警及活跃 WebSocket 请求取消告警不属于本功能回归。
 
 ## 未纳入分支的本机文件
 
