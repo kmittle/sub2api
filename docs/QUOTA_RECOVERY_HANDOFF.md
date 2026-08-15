@@ -2,9 +2,9 @@
 
 更新日期：2026-08-16
 
-当前开发分支：`handoff/quota-recovery-20260815`
+本次功能代码提交：`4202cc31b87d867753b21601c54265f457eed060`
 
-当前基线提交：`7e5fc83d0`
+已合并并推送分支：`main`
 
 ## 最终语义
 
@@ -142,7 +142,7 @@ frontend/src/views/admin/AccountsView.vue
 
 ## 本轮本地验证
 
-本轮只使用本地单元测试、Testcontainers PostgreSQL/Redis 和前端测试桩；没有连接中转站，没有调用真实账号/API，没有启用 VPN。
+本轮本地测试阶段只使用单元测试、Testcontainers PostgreSQL/Redis 和前端测试桩；该阶段没有连接中转站，没有调用真实账号/API，没有启用 VPN。
 
 后端严格串行执行：
 
@@ -180,7 +180,28 @@ vite build：通过
 
 2026-08-15 曾构建并部署镜像 `local/sub2api:quota-recovery-20260815-f480d02c9`，其镜像 ID 为 `sha256:0a268217e28534bf8399998b231acd41ae3ad8bd37ff5a5875faa8b2cc8a194a`。该镜像对应澄清前实现，会在旧余额错误恢复时自动写 `schedulable=true`，因此不能作为最终语义的验收镜像，也不能直接复用为本次修复的发布产物。
 
-当时的 Compose 五层叠加、分组、模型映射、effort 映射和代理拓扑均未改动；旧运行镜像 `local/sub2api:claude-idle-20260814-r2` 曾保留作回滚。当前修复必须在本地验证完成后重新提交、构建新镜像并部署，不能只重启旧镜像。
+当时的 Compose 五层叠加、分组、模型映射、effort 映射和代理拓扑均未改动；旧运行镜像 `local/sub2api:claude-idle-20260814-r2` 曾保留作回滚。最终修复必须使用重新构建的镜像，不能只重启这个缺陷镜像。
+
+## 最终部署记录
+
+2026-08-16 已在开发服务器构建并部署澄清后实现：
+
+```text
+image=local/sub2api:quota-recovery-20260816-4202cc31b
+image_id=sha256:1622c95b4313fc791a142646349fd9e5849abfcc4d7ff104c71af6b770a8b531
+archive_sha256=ceb1698f1db1c686458054eb697db89ec06c104be3e6f2bce7c136e99064a381
+embedded_version=quota-recovery-20260816
+embedded_commit=4202cc31b
+```
+
+- 功能分支和 `main` 均已推送 GitHub；中转站检出 `main@4202cc31b87d`。
+- 中转站只执行归档校验、`docker load` 和单独重建 `sub2api`，没有执行 Go、Node 或 Docker build。
+- Compose 仍使用原五层顺序。切换前后 Caddy、Kimi relay、Mihomo、PostgreSQL 和 Redis 的 Compose service hash 完全一致，只有 `sub2api` 因镜像标签变化而改变。
+- 部署前后，分组完整配置、账号分组关系、账号/频道模型映射、分组 effort 策略和所有人工 `schedulable` 值的数据库哈希逐项一致。
+- 三个 OpenAI OAuth 账号均保留原生 5h/7d 额度快照；部署时当前槽位已是 `2026-08-15T20:00:00Z`，因此没有删除槽位或强制重复真实探测，也没有消耗 Kimi API。
+- 容器内直连和公网健康检查均返回 `{"status":"ok"}`；所有六个服务 healthy，近期日志没有 quota recovery failure、panic、fatal、ERROR 或 FATAL。
+- 部署后可用内存约 2649 MiB、Swap 使用约 132 MiB、memory PSI 10/60/300 秒均为 `0.00`；`sub2api` 内存约 88 MiB。
+- 缺陷镜像 `local/sub2api:quota-recovery-20260815-f480d02c9` 和旧稳定镜像 `local/sub2api:claude-idle-20260814-r2` 均保留，仅用于回滚，不得用于本功能验收。
 
 ## 部署边界
 
