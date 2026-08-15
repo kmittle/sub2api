@@ -227,6 +227,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 			Name: name, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
 			Status: service.StatusError, ErrorMessage: errorMessage,
 			Credentials: map[string]any{"api_key": "sk-test"},
+			Extra:       map[string]any{"operator_setting": "keep"},
 		})
 		_, err := tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE WHERE id = $1", account.ID)
 		require.NoError(t, err)
@@ -250,6 +251,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	require.Equal(t, service.StatusActive, got.Status)
 	require.True(t, got.Schedulable)
 	require.Empty(t, got.ErrorMessage)
+	require.Equal(t, "keep", got.Extra["operator_setting"], "an empty model-limit key set must preserve existing extra")
 	require.Len(t, cache.setAccounts, 1)
 	require.Equal(t, recoverable.ID, cache.setAccounts[0].ID)
 

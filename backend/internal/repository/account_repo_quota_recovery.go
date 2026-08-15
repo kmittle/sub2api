@@ -204,7 +204,7 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 		return false, errors.New("quota recovery credential identity is not schedulable")
 	}
 
-	keys := append([]string(nil), mutation.ClearModelRateLimitKeys...)
+	keys := append([]string{}, mutation.ClearModelRateLimitKeys...)
 	sort.Strings(keys)
 	for i := 1; i < len(keys); i++ {
 		if keys[i] == keys[i-1] {
