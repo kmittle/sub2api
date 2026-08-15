@@ -141,6 +141,8 @@ export default {
         unschedulable: 'Unschedulable',
         rateLimitedUntil: 'Rate limited and removed from scheduling. Auto resumes at {time}',
         rateLimitedAutoResume: 'Auto resumes in {time}',
+        quotaRecoveryPending: 'Waiting for the quota recovery check',
+        quotaExhaustedUntilChecked: 'Quota is exhausted and scheduling is blocked until a recovery check confirms availability',
         modelRateLimitedUntil: '{model} rate limited until {time}',
         modelCreditOveragesUntil: '{model} using AI Credits until {time}',
         creditsExhausted: 'Credits Exhausted',

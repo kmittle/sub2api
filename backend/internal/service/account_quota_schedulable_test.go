@@ -121,3 +121,19 @@ func TestAccountIsSchedulable_QuotaExceeded(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountIsSchedulable_QuotaExhaustionWithoutReset(t *testing.T) {
+	limitedAt := time.Now().Add(-time.Minute)
+	account := &Account{
+		Status:        StatusActive,
+		Schedulable:   true,
+		RateLimitedAt: &limitedAt,
+	}
+
+	require.True(t, account.IsRateLimited())
+	require.False(t, account.IsSchedulable())
+
+	account.RateLimitedAt = nil
+	require.False(t, account.IsRateLimited())
+	require.True(t, account.IsSchedulable())
+}

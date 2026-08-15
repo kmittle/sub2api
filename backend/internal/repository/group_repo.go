@@ -916,7 +916,7 @@ const (
 				AND a.status = 'active'
 				AND a.schedulable = true
 				AND (a.expires_at IS NULL OR a.expires_at > NOW() OR a.auto_pause_on_expired = FALSE)
-				AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= NOW())
+				AND (a.rate_limit_reset_at <= NOW() OR (a.rate_limited_at IS NULL AND a.rate_limit_reset_at IS NULL))
 				AND (a.overload_until IS NULL OR a.overload_until <= NOW())
 				AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until <= NOW())`
 
@@ -927,6 +927,7 @@ const (
 				AND (a.expires_at IS NULL OR a.expires_at > NOW() OR a.auto_pause_on_expired = FALSE)
 				AND (
 					a.rate_limit_reset_at > NOW() OR
+					(a.rate_limited_at IS NOT NULL AND a.rate_limit_reset_at IS NULL) OR
 					a.overload_until > NOW() OR
 					a.temp_unschedulable_until > NOW()
 				)`

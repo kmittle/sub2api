@@ -463,6 +463,12 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 					SetRateLimitResetAt(time.Now().Add(10 * time.Minute)).
 					Exec(context.Background())
 				s.Require().NoError(err)
+				quotaExhausted := mustCreateAccount(s.T(), client, &service.Account{Name: "active-quota-exhausted", Status: service.StatusActive})
+				err = client.Account.UpdateOneID(quotaExhausted.ID).
+					SetRateLimitedAt(time.Now()).
+					ClearRateLimitResetAt().
+					Exec(context.Background())
+				s.Require().NoError(err)
 				tempUnsched := mustCreateAccount(s.T(), client, &service.Account{Name: "active-temp-unsched", Status: service.StatusActive})
 				err = client.Account.UpdateOneID(tempUnsched.ID).
 					SetTempUnschedulableUntil(time.Now().Add(15 * time.Minute)).
@@ -495,6 +501,13 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 					SetRateLimitResetAt(time.Now().Add(10 * time.Minute)).
 					Exec(context.Background())
 				s.Require().NoError(err)
+				quotaExhausted := mustCreateAccount(s.T(), client, &service.Account{Name: "active-quota-exhausted", Status: service.StatusActive})
+				err = client.Account.UpdateOneID(quotaExhausted.ID).
+					SetSchedulable(false).
+					SetRateLimitedAt(time.Now()).
+					ClearRateLimitResetAt().
+					Exec(context.Background())
+				s.Require().NoError(err)
 				tempUnsched := mustCreateAccount(s.T(), client, &service.Account{Name: "active-temp-unsched", Status: service.StatusActive})
 				err = client.Account.UpdateOneID(tempUnsched.ID).
 					SetSchedulable(false).
@@ -516,6 +529,12 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 					SetRateLimitResetAt(time.Now().Add(10 * time.Minute)).
 					Exec(context.Background())
 				s.Require().NoError(err)
+				quotaExhausted := mustCreateAccount(s.T(), client, &service.Account{Name: "active-quota-exhausted", Status: service.StatusActive})
+				err = client.Account.UpdateOneID(quotaExhausted.ID).
+					SetRateLimitedAt(time.Now()).
+					ClearRateLimitResetAt().
+					Exec(context.Background())
+				s.Require().NoError(err)
 				tempUnsched := mustCreateAccount(s.T(), client, &service.Account{Name: "active-temp-unsched", Status: service.StatusActive})
 				err = client.Account.UpdateOneID(tempUnsched.ID).
 					SetRateLimitResetAt(time.Now().Add(20 * time.Minute)).
@@ -524,9 +543,10 @@ func (s *AccountRepoSuite) TestListWithFilters() {
 				s.Require().NoError(err)
 			},
 			status:    "rate_limited",
-			wantCount: 1,
+			wantCount: 2,
 			validate: func(accounts []service.Account) {
-				s.Require().Equal("active-rate-limited", accounts[0].Name)
+				names := []string{accounts[0].Name, accounts[1].Name}
+				s.Require().ElementsMatch([]string{"active-rate-limited", "active-quota-exhausted"}, names)
 			},
 		},
 		{

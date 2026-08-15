@@ -265,7 +265,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	got, err := repo.GetByID(ctx, recoverable.ID)
 	require.NoError(t, err)
 	require.Equal(t, service.StatusActive, got.Status)
-	require.True(t, got.Schedulable)
+	require.False(t, got.Schedulable, "legacy recovery must preserve the administrator-owned scheduling switch")
 	require.Empty(t, got.ErrorMessage)
 	require.Equal(t, "keep", got.Extra["operator_setting"], "an empty model-limit key set must preserve existing extra")
 	require.Equal(t, originalCredentials, got.Credentials, "quota recovery must not rewrite model mapping or upstream identity")
@@ -300,6 +300,83 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	require.False(t, got.Schedulable)
 	require.Equal(t, newError, got.ErrorMessage)
 	require.Len(t, cache.setAccounts, 1, "a CAS miss must not refresh the scheduler snapshot")
+}
+
+func TestApplyQuotaRecoveryMutationClearsQuotaExhaustionWithoutLosingConcurrentManualPause(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+	limitedAt := time.Now().UTC().Truncate(time.Microsecond)
+	account := mustCreateAccount(t, tx.Client(), &service.Account{
+		Name: "quota-recovery-manual-pause", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, Schedulable: true,
+		Credentials:   map[string]any{"api_key": "test-key", "model_mapping": map[string]any{"gpt-test": "upstream-test"}},
+		Extra:         map[string]any{"operator_setting": "keep"},
+		RateLimitedAt: &limitedAt,
+	})
+	observed, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+
+	_, err = tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE, updated_at = NOW() WHERE id = $1", account.ID)
+	require.NoError(t, err)
+
+	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
+		Target: observed, Identity: observed,
+		ClearQuotaExhaustion:     true,
+		ExpectedQuotaExhaustedAt: observed.RateLimitedAt,
+		ExtraUpdates:             map[string]any{"quota_recovery_snapshot": map[string]any{"available": true}},
+	})
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	got, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusActive, got.Status)
+	require.False(t, got.Schedulable, "a manual pause during the probe must survive the CAS update")
+	require.Nil(t, got.RateLimitedAt)
+	require.Nil(t, got.RateLimitResetAt)
+	require.Equal(t, "keep", got.Extra["operator_setting"])
+	require.Equal(t, observed.Credentials, got.Credentials, "model mapping and credential identity must remain byte-equivalent")
+}
+
+func TestApplyQuotaRecoveryMutationClearsTimedRateLimitWithoutLosingConcurrentManualPause(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+	limitedAt := time.Now().UTC().Truncate(time.Microsecond)
+	resetAt := limitedAt.Add(time.Hour)
+	account := mustCreateAccount(t, tx.Client(), &service.Account{
+		Name: "quota-recovery-timed-manual-pause", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, Schedulable: true,
+		Credentials:      map[string]any{"api_key": "test-key", "model_mapping": map[string]any{"gpt-test": "upstream-test"}},
+		Extra:            map[string]any{"operator_setting": "keep"},
+		RateLimitedAt:    &limitedAt,
+		RateLimitResetAt: &resetAt,
+	})
+	observed, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+
+	_, err = tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE, updated_at = NOW() WHERE id = $1", account.ID)
+	require.NoError(t, err)
+
+	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
+		Target: observed, Identity: observed,
+		ClearGlobalRateLimit:     true,
+		ExpectedRateLimitedAt:    observed.RateLimitedAt,
+		ExpectedRateLimitResetAt: observed.RateLimitResetAt,
+		ExtraUpdates:             map[string]any{"quota_recovery_snapshot": map[string]any{"available": true}},
+	})
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	got, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusActive, got.Status)
+	require.False(t, got.Schedulable, "a manual pause during the probe must survive the CAS update")
+	require.Nil(t, got.RateLimitedAt)
+	require.Nil(t, got.RateLimitResetAt)
+	require.Equal(t, "keep", got.Extra["operator_setting"])
+	require.Equal(t, observed.Credentials, got.Credentials, "model mapping and credential identity must remain byte-equivalent")
 }
 
 func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t *testing.T) {
@@ -350,7 +427,12 @@ func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t 
 	require.NoError(t, err)
 	setupUnblocked := create("quota-scan-setup-unblocked", service.PlatformAnthropic, service.AccountTypeSetupToken, map[string]any{"access_token": "setup"}, true, false)
 	geminiUnblocked := create("quota-scan-gemini-unblocked", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, true, false)
-	manualDisabled := create("quota-scan-manual-disabled", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, true)
+	manualTimedRateLimit := create("quota-scan-manual-timed-rate-limit", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, true)
+	want = append(want, manualTimedRateLimit)
+	manualQuotaExhausted := create("quota-scan-manual-quota-exhausted", service.PlatformGemini, service.AccountTypeAPIKey, map[string]any{"api_key": "key"}, false, false)
+	_, err = tx.ExecContext(ctx, "UPDATE accounts SET rate_limited_at = $2, rate_limit_reset_at = NULL WHERE id = $1", manualQuotaExhausted.ID, now)
+	require.NoError(t, err)
+	want = append(want, manualQuotaExhausted)
 
 	page, err := repo.ListQuotaRecoveryAccountPage(ctx, service.QuotaRecoveryAccountPageOptions{Limit: 100})
 	require.NoError(t, err)
@@ -362,7 +444,7 @@ func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t 
 	for _, account := range want {
 		require.Contains(t, gotIDs, account.ID, account.Name)
 	}
-	for _, account := range []*service.Account{setupUnblocked, geminiUnblocked, manualDisabled, authError} {
+	for _, account := range []*service.Account{setupUnblocked, geminiUnblocked, authError} {
 		require.NotContains(t, gotIDs, account.ID, account.Name)
 	}
 }

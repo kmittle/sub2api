@@ -433,23 +433,45 @@ func TestOpenAIRuntimeBlock_QuotaRecoveryNeverClearsNonQuotaReason(t *testing.T)
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
-func TestOpenAIRuntimeBlock_QuotaErrorClearRequiresExplicitFlag(t *testing.T) {
+func TestOpenAIRuntimeBlock_QuotaExhaustionClearRequiresExactReasonAndFlag(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 50, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), "quota_exhausted")
+	observed, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
+	require.True(t, ok)
+	require.Equal(t, "quota_exhausted", observed.Reason)
+
+	require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, false))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.True(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, true))
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+
 	for _, reason := range []string{"auth_error", "upstream_disable"} {
-		t.Run(reason, func(t *testing.T) {
-			svc := &OpenAIGatewayService{}
-			account := &Account{ID: 50, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-
-			svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), reason)
-			observed, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
-			require.True(t, ok)
-			require.Equal(t, reason, observed.Reason)
-
-			require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, false))
-			require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
-			require.True(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, observed, false, false, true))
-			require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
-		})
+		svc.BlockAccountScheduling(account, time.Now().Add(time.Minute), reason)
+		current, present := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
+		require.True(t, present)
+		require.False(t, svc.ClearQuotaRecoveryRuntimeBlock(account.ID, current, false, false, true))
+		svc.ClearAccountSchedulingBlock(account.ID)
 	}
+}
+
+func TestOpenAIQuotaExhaustionRuntimeReasonIsNotRelabeledAsGenericDisable(t *testing.T) {
+	repo := &quotaExhaustionAccountRepoStub{}
+	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	svc := &OpenAIGatewayService{rateLimitService: rateLimitService}
+	rateLimitService.SetAccountRuntimeBlocker(svc)
+	account := &Account{ID: 51, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true}
+
+	shouldDisable := svc.handleOpenAIAccountUpstreamError(
+		context.Background(), account, http.StatusPaymentRequired, http.Header{},
+		[]byte(`{"error":{"message":"insufficient balance"}}`),
+	)
+
+	require.True(t, shouldDisable)
+	observed, ok := svc.SnapshotQuotaRecoveryRuntimeBlock(account.ID)
+	require.True(t, ok)
+	require.Equal(t, "quota_exhausted", observed.Reason)
 }
 
 func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {

@@ -169,11 +169,11 @@ func (s *quotaRecoveryTempCacheStub) DeleteTempUnschedIfMatch(_ context.Context,
 }
 
 type quotaRecoveryRuntimeBlockerStub struct {
-	cleared          []int64
-	broadCleared     []int64
-	clearQuotaErrors []bool
-	snapshot         QuotaRecoveryRuntimeBlockSnapshot
-	present          bool
+	cleared               []int64
+	broadCleared          []int64
+	clearQuotaExhaustions []bool
+	snapshot              QuotaRecoveryRuntimeBlockSnapshot
+	present               bool
 }
 
 func (*quotaRecoveryRuntimeBlockerStub) BlockAccountScheduling(*Account, time.Time, string) {}
@@ -199,10 +199,10 @@ func (s *quotaRecoveryRuntimeBlockerStub) ClearQuotaRecoveryRuntimeBlock(
 	_ QuotaRecoveryRuntimeBlockSnapshot,
 	_ bool,
 	_ bool,
-	clearQuotaError bool,
+	clearQuotaExhaustion bool,
 ) bool {
 	s.cleared = append(s.cleared, accountID)
-	s.clearQuotaErrors = append(s.clearQuotaErrors, clearQuotaError)
+	s.clearQuotaExhaustions = append(s.clearQuotaExhaustions, clearQuotaExhaustion)
 	return true
 }
 
@@ -411,14 +411,7 @@ func TestQuotaRecoveryBalanceErrorSuccessRestoresOnlyObservedQuotaError(t *testi
 	}
 	repo := &quotaRecoveryRepositoryStub{}
 	tester := &quotaRecoveryAccountTesterStub{result: &ScheduledTestResult{Status: "success"}}
-	blocker := &quotaRecoveryRuntimeBlockerStub{
-		snapshot: QuotaRecoveryRuntimeBlockSnapshot{
-			Generation: 9,
-			Until:      time.Now().Add(time.Hour),
-			Reason:     "upstream_disable",
-		},
-		present: true,
-	}
+	blocker := &quotaRecoveryRuntimeBlockerStub{}
 	svc := NewQuotaRecoveryService(repo, nil, tester, nil, nil, blocker, nil, nil)
 
 	result := svc.refreshConnectivity(context.Background(), account)
@@ -431,8 +424,79 @@ func TestQuotaRecoveryBalanceErrorSuccessRestoresOnlyObservedQuotaError(t *testi
 	require.True(t, mutations[0].ClearQuotaError)
 	require.False(t, mutations[0].Target.Schedulable)
 	require.Equal(t, StatusError, mutations[0].Target.Status)
+	require.Empty(t, blocker.cleared, "legacy broad runtime reasons are not quota-owned")
+}
+
+func TestQuotaRecoveryQuotaExhaustionSuccessPreservesManualSchedulingState(t *testing.T) {
+	t.Parallel()
+
+	limitedAt := time.Now().UTC().Truncate(time.Second)
+	account := &Account{
+		ID: 142, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: false,
+		Credentials: map[string]any{"api_key": "sk-test"}, RateLimitedAt: &limitedAt,
+	}
+	repo := &quotaRecoveryRepositoryStub{}
+	tester := &quotaRecoveryAccountTesterStub{result: &ScheduledTestResult{Status: "success"}}
+	blocker := &quotaRecoveryRuntimeBlockerStub{
+		snapshot: QuotaRecoveryRuntimeBlockSnapshot{
+			Generation: 11,
+			Until:      time.Now().Add(time.Hour),
+			Reason:     "quota_exhausted",
+		},
+		present: true,
+	}
+	svc := NewQuotaRecoveryService(repo, nil, tester, nil, nil, blocker, nil, nil)
+
+	result := svc.refreshConnectivity(context.Background(), account)
+	require.NoError(t, result.err)
+	require.Equal(t, 1, result.probes)
+	require.Equal(t, 1, result.cleared)
+	require.True(t, tester.readOnly)
+	_, _, _, mutations, _ := repo.snapshot()
+	require.Len(t, mutations, 1)
+	require.True(t, mutations[0].ClearQuotaExhaustion)
+	require.WithinDuration(t, limitedAt, *mutations[0].ExpectedQuotaExhaustedAt, time.Microsecond)
+	require.False(t, mutations[0].Target.Schedulable)
 	require.Equal(t, []int64{account.ID}, blocker.cleared)
-	require.Equal(t, []bool{true}, blocker.clearQuotaErrors)
+	require.Equal(t, []bool{true}, blocker.clearQuotaExhaustions)
+}
+
+func TestQuotaRecoveryTimedRateLimitSuccessPreservesManualSchedulingState(t *testing.T) {
+	t.Parallel()
+
+	limitedAt := time.Now().UTC().Truncate(time.Second)
+	resetAt := limitedAt.Add(time.Hour)
+	account := &Account{
+		ID: 143, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: false,
+		Credentials: map[string]any{"api_key": "sk-test"}, RateLimitedAt: &limitedAt, RateLimitResetAt: &resetAt,
+	}
+	repo := &quotaRecoveryRepositoryStub{}
+	tester := &quotaRecoveryAccountTesterStub{result: &ScheduledTestResult{Status: "success"}}
+	blocker := &quotaRecoveryRuntimeBlockerStub{
+		snapshot: QuotaRecoveryRuntimeBlockSnapshot{
+			Generation: 12,
+			Until:      resetAt,
+			Reason:     "429",
+		},
+		present: true,
+	}
+	svc := NewQuotaRecoveryService(repo, nil, tester, nil, nil, blocker, nil, nil)
+
+	result := svc.refreshConnectivity(context.Background(), account)
+	require.NoError(t, result.err)
+	require.Equal(t, 1, result.probes)
+	require.Equal(t, 1, result.cleared)
+	require.True(t, tester.readOnly)
+	_, _, _, mutations, _ := repo.snapshot()
+	require.Len(t, mutations, 1)
+	require.True(t, mutations[0].ClearGlobalRateLimit)
+	require.WithinDuration(t, limitedAt, *mutations[0].ExpectedRateLimitedAt, time.Microsecond)
+	require.WithinDuration(t, resetAt, *mutations[0].ExpectedRateLimitResetAt, time.Microsecond)
+	require.False(t, mutations[0].Target.Schedulable)
+	require.Equal(t, []int64{account.ID}, blocker.cleared)
+	require.Equal(t, []bool{false}, blocker.clearQuotaExhaustions)
 }
 
 func TestQuotaRecoveryBalanceErrorFailureNeverRestoresAccount(t *testing.T) {
@@ -545,24 +609,15 @@ func TestQuotaRecoveryCASMissDoesNotRefreshRuntimeCaches(t *testing.T) {
 	require.Empty(t, blocker.cleared)
 }
 
-func TestQuotaRecoveryDoesNotProbeManualOrNonQuotaBlocks(t *testing.T) {
+func TestQuotaRecoveryDoesNotProbeNonQuotaBlocks(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	resetAt := now.Add(time.Hour)
 	tempUntil := now.Add(time.Hour)
 	tests := []struct {
 		name    string
 		account *Account
 	}{
-		{
-			name: "manual schedulable false",
-			account: &Account{
-				ID: 51, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive,
-				Credentials:   map[string]any{"api_key": "sk-test"},
-				RateLimitedAt: &now, RateLimitResetAt: &resetAt,
-			},
-		},
 		{
 			name: "non-threshold temporary block",
 			account: &Account{
@@ -777,7 +832,7 @@ func TestAntigravityQuotaRecoveryClearsOnlyAuthoritativelyAvailableModelKeys(t *
 	require.False(t, authoritativeAntigravityAvailable(account, usage))
 }
 
-func TestQuotaRecoveryMutationHelpersPreserveManualAndNonThresholdBlocks(t *testing.T) {
+func TestQuotaRecoveryMutationHelpersIgnoreManualPauseAndPreserveNonQuotaBlocks(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
@@ -793,11 +848,17 @@ func TestQuotaRecoveryMutationHelpersPreserveManualAndNonThresholdBlocks(t *test
 	mutation := newQuotaRecoveryMutation(account, account, nil, nil)
 	addObservedAccountBlocks(&mutation, account, account, nil, true)
 	addExpectedModelLimit(&mutation, account, "model", "")
-	require.False(t, mutation.ClearGlobalRateLimit)
+	require.True(t, mutation.ClearGlobalRateLimit)
 	require.False(t, mutation.ClearThresholdBlock)
-	require.Empty(t, mutation.ClearModelRateLimitKeys)
+	require.Equal(t, []string{"model"}, mutation.ClearModelRateLimitKeys)
+	require.False(t, mutation.ClearQuotaExhaustion)
 
-	account.Schedulable = true
+	account.RateLimitResetAt = nil
+	mutation = newQuotaRecoveryMutation(account, account, nil, nil)
+	addObservedAccountBlocks(&mutation, account, account, nil, true)
+	require.True(t, mutation.ClearQuotaExhaustion, "manual scheduling must not suppress quota recovery")
+
+	account.RateLimitResetAt = &resetAt
 	mutation = newQuotaRecoveryMutation(account, account, nil, nil)
 	addObservedAccountBlocks(&mutation, account, account, nil, true)
 	require.True(t, mutation.ClearGlobalRateLimit)
@@ -814,7 +875,7 @@ func TestQuotaRecoveryIdentityAllowsRestoreOnlyHealthyParentOrOwnedBalanceError(
 		want     bool
 	}{
 		{name: "healthy parent", identity: &Account{ID: 202, Status: StatusActive, Schedulable: true}, want: true},
-		{name: "manually paused parent", identity: &Account{ID: 202, Status: StatusActive}},
+		{name: "manually paused parent", identity: &Account{ID: 202, Status: StatusActive}, want: true},
 		{name: "disabled parent", identity: &Account{ID: 202, Status: StatusDisabled, Schedulable: true}},
 		{name: "different balance-error parent", identity: &Account{ID: 202, Status: StatusError, ErrorMessage: QuotaRecoveryPaymentErrorPrefix + " exhausted"}},
 		{name: "target owns balance error", identity: target, want: true},
@@ -910,7 +971,8 @@ func TestQuotaRecoveryProbeEligibilityCoversSupportedCredentialMatrix(t *testing
 		{name: "invalid service account is skipped", account: blocked(PlatformGemini, AccountTypeServiceAccount, map[string]any{"service_account_json": `{}`})},
 		{name: "unsupported platform/type pair is skipped", account: blocked(PlatformOpenAI, AccountTypeSetupToken, map[string]any{"access_token": "token"})},
 		{name: "unblocked Gemini account is skipped", account: &Account{ID: 2, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "key"}}},
-		{name: "manual schedulable false is never connectivity-probed", account: &Account{ID: 3, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Credentials: map[string]any{"api_key": "key"}, RateLimitedAt: &now, RateLimitResetAt: &resetAt}},
+		{name: "manual schedulable false timed cooldown is connectivity-probed", account: &Account{ID: 3, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Credentials: map[string]any{"api_key": "key"}, RateLimitedAt: &now, RateLimitResetAt: &resetAt}, connectivity: true},
+		{name: "manual schedulable false quota exhaustion is connectivity-probed", account: &Account{ID: 31, Platform: PlatformGemini, Type: AccountTypeAPIKey, Status: StatusActive, Credentials: map[string]any{"api_key": "key"}, RateLimitedAt: &now}, connectivity: true},
 		{name: "manual schedulable false still refreshes authoritative balance", account: &Account{ID: 4, Platform: PlatformAntigravity, Type: AccountTypeOAuth, Status: StatusActive, Credentials: map[string]any{"access_token": "token"}}, authoritative: true},
 		{
 			name: "balance error oauth still refreshes authoritative balance",
@@ -930,9 +992,10 @@ func TestQuotaRecoveryProbeEligibilityCoversSupportedCredentialMatrix(t *testing
 				ErrorMessage: "Authentication failed (401): invalid API key", Credentials: map[string]any{"api_key": "key"}},
 		},
 		{
-			name: "schedulable balance error is not recovery-owned",
+			name: "schedulable legacy balance error remains recovery-owned",
 			account: &Account{ID: 8, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusError, Schedulable: true,
 				ErrorMessage: QuotaRecoveryPaymentErrorPrefix + " billing issue", Credentials: map[string]any{"api_key": "key"}},
+			connectivity: true,
 		},
 	}
 

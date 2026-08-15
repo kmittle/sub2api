@@ -73,7 +73,12 @@
       <div
         class="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-56 -translate-x-1/2 whitespace-normal rounded bg-gray-900 px-3 py-2 text-center text-xs leading-relaxed text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-gray-700"
       >
-        {{ t('admin.accounts.status.rateLimitedUntil', { time: formatDateTime(account.rate_limit_reset_at) }) }}
+        <template v-if="isQuotaExhausted">
+          {{ t('admin.accounts.status.quotaExhaustedUntilChecked') }}
+        </template>
+        <template v-else>
+          {{ t('admin.accounts.status.rateLimitedUntil', { time: formatDateTime(account.rate_limit_reset_at) }) }}
+        </template>
         <div
           class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"
         ></div>
@@ -177,9 +182,12 @@ const emit = defineEmits<{
 
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {
+  if (props.account.rate_limited_at && !props.account.rate_limit_reset_at) return true
   if (!props.account.rate_limit_reset_at) return false
   return new Date(props.account.rate_limit_reset_at) > new Date()
 })
+
+const isQuotaExhausted = computed(() => Boolean(props.account.rate_limited_at && !props.account.rate_limit_reset_at))
 
 type AccountModelStatusItem = {
   kind: 'rate_limit' | 'credits_exhausted' | 'credits_active'
@@ -297,6 +305,7 @@ const rateLimitCountdown = computed(() => {
 })
 
 const rateLimitResumeText = computed(() => {
+  if (isQuotaExhausted.value) return t('admin.accounts.status.quotaRecoveryPending')
   if (!rateLimitCountdown.value) return ''
   return t('admin.accounts.status.rateLimitedAutoResume', { time: rateLimitCountdown.value })
 })

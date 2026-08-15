@@ -2071,7 +2071,8 @@ const accountMatchesCurrentFilters = (account: Account) => {
   if (filters.status) {
     const now = Date.now()
     const rateLimitResetAt = account.rate_limit_reset_at ? new Date(account.rate_limit_reset_at).getTime() : Number.NaN
-    const isRateLimited = Number.isFinite(rateLimitResetAt) && rateLimitResetAt > now
+    const isRateLimited = Boolean(account.rate_limited_at && !account.rate_limit_reset_at) ||
+      (Number.isFinite(rateLimitResetAt) && rateLimitResetAt > now)
     const tempUnschedUntil = account.temp_unschedulable_until ? new Date(account.temp_unschedulable_until).getTime() : Number.NaN
     const isTempUnschedulable = Number.isFinite(tempUnschedUntil) && tempUnschedUntil > now
 

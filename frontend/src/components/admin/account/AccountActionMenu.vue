@@ -75,6 +75,9 @@ const canDuplicate = computed(() => {
   return ['apikey', 'upstream', 'bedrock', 'service_account'].includes(props.account.type)
 })
 const isRateLimited = computed(() => {
+  if (props.account?.rate_limited_at && !props.account.rate_limit_reset_at) {
+    return true
+  }
   if (props.account?.rate_limit_reset_at && new Date(props.account.rate_limit_reset_at) > new Date()) {
     return true
   }

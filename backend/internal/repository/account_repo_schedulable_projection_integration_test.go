@@ -55,6 +55,9 @@ func TestListSchedulableAccountLoadsMatchesListSchedulable(t *testing.T) {
 	rateLimited := create("projection-rate-limited")
 	_, err = client.Account.UpdateOneID(rateLimited.ID).SetRateLimitResetAt(future).Save(ctx)
 	require.NoError(t, err)
+	quotaExhausted := create("projection-quota-exhausted")
+	_, err = client.Account.UpdateOneID(quotaExhausted.ID).SetRateLimitedAt(now).ClearRateLimitResetAt().Save(ctx)
+	require.NoError(t, err)
 	rateLimitCleared := create("projection-rate-limit-cleared")
 	_, err = client.Account.UpdateOneID(rateLimitCleared.ID).SetRateLimitResetAt(past).Save(ctx)
 	require.NoError(t, err)
@@ -101,7 +104,7 @@ func TestListSchedulableAccountLoadsMatchesListSchedulable(t *testing.T) {
 	for _, included := range []*service.Account{expiredAllowed, overloadCleared, rateLimitCleared, tempCleared} {
 		require.Contains(t, byID, included.ID)
 	}
-	for _, excluded := range []*service.Account{disabled, unschedulable, expired, overloaded, rateLimited, tempBlocked} {
+	for _, excluded := range []*service.Account{disabled, unschedulable, expired, overloaded, rateLimited, quotaExhausted, tempBlocked} {
 		require.NotContains(t, byID, excluded.ID)
 	}
 }

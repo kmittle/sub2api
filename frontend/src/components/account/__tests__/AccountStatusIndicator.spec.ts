@@ -51,6 +51,30 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('额度耗尽且无重置时间时显示等待巡检，不虚构自动恢复时间', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          platform: 'openai',
+          type: 'apikey',
+          schedulable: false,
+          rate_limited_at: '2026-08-16T00:00:00Z',
+          rate_limit_reset_at: null
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    expect(wrapper.find('.badge-warning').text()).toBe('admin.accounts.status.rateLimited')
+    expect(wrapper.text()).toContain('admin.accounts.status.quotaRecoveryPending')
+    expect(wrapper.text()).toContain('admin.accounts.status.quotaExhaustedUntilChecked')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.rateLimitedAutoResume')
+  })
+
   it('Claude 5 模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

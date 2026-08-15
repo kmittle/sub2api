@@ -344,6 +344,8 @@ export default {
         unschedulable: '不可调度',
         rateLimitedUntil: '限流中，当前不参与调度，预计 {time} 自动恢复',
         rateLimitedAutoResume: '{time} 自动恢复',
+        quotaRecoveryPending: '等待额度巡检确认恢复',
+        quotaExhaustedUntilChecked: '额度已耗尽，当前不参与调度；巡检确认恢复后将清除额度阻断',
         modelRateLimitedUntil: '{model} 限流至 {time}',
         modelCreditOveragesUntil: '{model} 正在使用 AI Credits，至 {time}',
         creditsExhausted: '积分已用尽',

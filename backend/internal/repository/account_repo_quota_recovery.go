@@ -82,11 +82,10 @@ func (r *accountRepository) ListQuotaRecoveryAccountPage(ctx context.Context, op
 						OR (platform = $6 AND type = $4 AND btrim(COALESCE(credentials->>'access_token', '')) <> '')
 						OR (platform = $7 AND type = $4)
 						OR (
-							schedulable IS TRUE
-							AND platform IN ($3, $5, $6, $7, $8)
+							platform IN ($3, $5, $6, $7, $8)
 							AND type IN ($4, $9, $10, $11, $12, $13)
 							AND (
-								(rate_limited_at IS NOT NULL AND rate_limit_reset_at IS NOT NULL)
+								rate_limited_at IS NOT NULL
 								OR (temp_unschedulable_until IS NOT NULL AND temp_unschedulable_reason LIKE '%account_scheduling_threshold%')
 							)
 						)
@@ -94,7 +93,6 @@ func (r *accountRepository) ListQuotaRecoveryAccountPage(ctx context.Context, op
 				)
 				OR (
 					status = $15
-					AND schedulable IS FALSE
 					AND (error_message LIKE $16 OR error_message LIKE $17)
 					AND platform IN ($3, $5, $6, $7, $8)
 					AND type IN ($4, $9, $10, $11, $12, $13)
@@ -181,17 +179,27 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 	if mutation.ClearGlobalRateLimit && (mutation.ExpectedRateLimitedAt == nil || mutation.ExpectedRateLimitResetAt == nil) {
 		return false, errors.New("quota recovery global clear is missing its observed generation")
 	}
+	if mutation.ClearQuotaExhaustion && mutation.ExpectedQuotaExhaustedAt == nil {
+		return false, errors.New("quota recovery quota-exhaustion clear is missing its observed generation")
+	}
+	if mutation.ClearGlobalRateLimit && mutation.ClearQuotaExhaustion {
+		return false, errors.New("quota recovery cannot clear timed and indefinite rate limits together")
+	}
 	if mutation.ClearThresholdBlock && (mutation.ExpectedTempUntil == nil || mutation.ExpectedTempReason == "") {
 		return false, errors.New("quota recovery threshold clear is missing its observed generation")
 	}
 	if mutation.ClearThresholdBlock && !service.IsAccountSchedulingThresholdReason(mutation.ExpectedTempReason) {
 		return false, errors.New("quota recovery refuses a non-threshold temporary block")
 	}
-	if mutation.ClearQuotaError && (mutation.Target.Status != service.StatusError || mutation.Target.Schedulable ||
+	if mutation.ClearQuotaError && (mutation.Target.Status != service.StatusError ||
 		!service.IsQuotaRecoveryBalanceErrorMessage(mutation.Target.ErrorMessage)) {
 		return false, errors.New("quota recovery refuses a non-balance account error")
 	}
-	targetHasBalanceError := mutation.Target.Status == service.StatusError && !mutation.Target.Schedulable &&
+	if mutation.ClearQuotaExhaustion && (mutation.Target.Status != service.StatusActive || mutation.Target.RateLimitedAt == nil ||
+		mutation.Target.RateLimitResetAt != nil || !mutation.Target.RateLimitedAt.Equal(*mutation.ExpectedQuotaExhaustedAt)) {
+		return false, errors.New("quota recovery refuses a non-quota-exhausted account")
+	}
+	targetHasBalanceError := mutation.Target.Status == service.StatusError &&
 		service.IsQuotaRecoveryBalanceErrorMessage(mutation.Target.ErrorMessage)
 	if mutation.Target.Status != service.StatusActive && !targetHasBalanceError {
 		return false, errors.New("quota recovery target is not active or balance-exhausted")
@@ -200,10 +208,6 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 	if mutation.Identity.Status != service.StatusActive && !identityOwnsTargetError {
 		return false, errors.New("quota recovery credential identity is not active")
 	}
-	if mutation.ClearQuotaError && mutation.Identity.ID != mutation.Target.ID && !mutation.Identity.Schedulable {
-		return false, errors.New("quota recovery credential identity is not schedulable")
-	}
-
 	keys := append([]string{}, mutation.ClearModelRateLimitKeys...)
 	sort.Strings(keys)
 	for i := 1; i < len(keys); i++ {
@@ -267,8 +271,6 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 	}
 
 	setSessionEnd := mutation.SessionWindowEnd != nil
-	requiresSchedulable := !mutation.ClearQuotaError &&
-		(mutation.ClearGlobalRateLimit || mutation.ClearThresholdBlock || len(keys) > 0)
 	rows, err := r.sql.QueryContext(ctx, `
 		WITH candidate AS (
 			SELECT a.id,
@@ -283,8 +285,8 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 				AND a.credentials = $10::jsonb
 				AND a.proxy_id IS NOT DISTINCT FROM $11
 				AND a.parent_account_id IS NOT DISTINCT FROM $12
-				AND a.quota_dimension = $36
-				AND COALESCE(a.extra->'allow_overages', 'null'::jsonb) = $37::jsonb
+				AND a.quota_dimension = $35
+				AND COALESCE(a.extra->'allow_overages', 'null'::jsonb) = $36::jsonb
 				AND i.platform = $14
 				AND i.type = $15
 				AND i.credentials = $16::jsonb
@@ -306,30 +308,28 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 							AND p.status = $27
 					))
 				)
-				AND a.status = $34
-				AND i.status = $38
+				AND a.status = $33
+				AND i.status = $37
 				AND (a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > NOW())
 				AND (i.auto_pause_on_expired IS NOT TRUE OR i.expires_at IS NULL OR i.expires_at > NOW())
-				AND (NOT $28::boolean OR (a.schedulable IS TRUE AND i.schedulable IS TRUE))
-				AND (NOT $39::boolean OR (
-					a.schedulable IS FALSE
-					AND a.error_message = $40
-					AND i.schedulable IS NOT DISTINCT FROM $41
-					AND i.error_message = $42
+				AND (NOT $38::boolean OR a.error_message = $39)
+				AND (NOT $41::boolean OR (
+					a.rate_limited_at = $42::timestamptz
+					AND a.rate_limit_reset_at IS NULL
 				))
 				AND (NOT $4::boolean OR (
-					a.rate_limited_at = $29::timestamptz
-					AND a.rate_limit_reset_at = $30::timestamptz
+					a.rate_limited_at = $28::timestamptz
+					AND a.rate_limit_reset_at = $29::timestamptz
 				))
 				AND (NOT $5::boolean OR (
-					a.temp_unschedulable_until = $31::timestamptz
-					AND a.temp_unschedulable_reason = $32
+					a.temp_unschedulable_until = $30::timestamptz
+					AND a.temp_unschedulable_reason = $31
 				))
 				AND (
 					cardinality($6::text[]) = 0
 					OR NOT EXISTS (
 						SELECT 1
-						FROM jsonb_each($33::jsonb) AS expected(key, value)
+						FROM jsonb_each($32::jsonb) AS expected(key, value)
 						WHERE (COALESCE(a.extra->'model_rate_limits', '{}'::jsonb)->expected.key) IS DISTINCT FROM expected.value
 					)
 				)
@@ -347,20 +347,19 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 					)
 					END,
 				session_window_end = CASE WHEN $3::boolean THEN $2::timestamptz ELSE a.session_window_end END,
-				rate_limited_at = CASE WHEN $4::boolean THEN NULL ELSE a.rate_limited_at END,
-				rate_limit_reset_at = CASE WHEN $4::boolean THEN NULL ELSE a.rate_limit_reset_at END,
+				rate_limited_at = CASE WHEN $4::boolean OR $41::boolean THEN NULL ELSE a.rate_limited_at END,
+				rate_limit_reset_at = CASE WHEN $4::boolean OR $41::boolean THEN NULL ELSE a.rate_limit_reset_at END,
 				temp_unschedulable_until = CASE WHEN $5::boolean THEN NULL ELSE a.temp_unschedulable_until END,
 				temp_unschedulable_reason = CASE WHEN $5::boolean THEN NULL ELSE a.temp_unschedulable_reason END,
-				status = CASE WHEN $39::boolean THEN $43 ELSE a.status END,
-				error_message = CASE WHEN $39::boolean THEN '' ELSE a.error_message END,
-				schedulable = CASE WHEN $39::boolean THEN TRUE ELSE a.schedulable END,
+				status = CASE WHEN $38::boolean THEN $40 ELSE a.status END,
+				error_message = CASE WHEN $38::boolean THEN '' ELSE a.error_message END,
 				updated_at = NOW()
 			FROM candidate
 			WHERE a.id = candidate.id
 			RETURNING a.id
 		), outbox AS (
 			INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
-			SELECT $35, id, NULL, NULL FROM updated
+			SELECT $34, id, NULL, NULL FROM updated
 			RETURNING account_id
 		)
 		SELECT id FROM updated`,
@@ -391,7 +390,6 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 		proxyUsername,
 		proxyPassword,
 		proxyStatus,
-		requiresSchedulable,
 		mutation.ExpectedRateLimitedAt,
 		mutation.ExpectedRateLimitResetAt,
 		mutation.ExpectedTempUntil,
@@ -404,9 +402,9 @@ func (r *accountRepository) ApplyQuotaRecoveryMutation(ctx context.Context, muta
 		mutation.Identity.Status,
 		mutation.ClearQuotaError,
 		mutation.Target.ErrorMessage,
-		mutation.Identity.Schedulable,
-		mutation.Identity.ErrorMessage,
 		service.StatusActive,
+		mutation.ClearQuotaExhaustion,
+		mutation.ExpectedQuotaExhaustedAt,
 	)
 	if err != nil {
 		return false, err

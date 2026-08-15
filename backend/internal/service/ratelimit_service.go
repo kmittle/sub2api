@@ -328,9 +328,9 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			s.handleAuthError(ctx, account, msg)
 			shouldDisable = true
 		} else if account.Platform == PlatformAnthropic && strings.Contains(strings.ToLower(upstreamMsg), "credit balance") {
-			// Anthropic API key 余额不足（语义等同 402），停止调度
-			msg := "Credit balance exhausted (400): " + upstreamMsg
-			s.handleAuthError(ctx, account, msg)
+			// 额度耗尽属于系统运行时阻断，不得改写管理员维护的
+			// status/schedulable 状态。
+			s.handleQuotaExhausted(ctx, account)
 			shouldDisable = true
 		} else if strings.Contains(strings.ToLower(upstreamMsg), "identity verification is required") {
 			// KYC 身份验证要求 → 永久禁用，账号需完成身份验证后才能恢复
@@ -443,12 +443,9 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			shouldDisable = true
 			break
 		}
-		// 支付要求：余额不足或计费问题，停止调度
-		msg := "Payment required (402): insufficient balance or billing issue"
-		if upstreamMsg != "" {
-			msg = "Payment required (402): " + upstreamMsg
-		}
-		s.handleAuthError(ctx, account, msg)
+		// 支付要求表示额度不可用。保留管理员的 status/schedulable，
+		// 由额度巡检成功后清除此无限期阻断。
+		s.handleQuotaExhausted(ctx, account)
 		shouldDisable = true
 	case 403:
 		logger.LegacyPrintf(
@@ -866,6 +863,32 @@ func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account
 		return
 	}
 	slog.Warn("account_disabled_auth_error", "account_id", account.ID, "error", errorMsg)
+}
+
+func (s *RateLimitService) handleQuotaExhausted(ctx context.Context, account *Account) {
+	if account == nil {
+		return
+	}
+	s.notifyAccountSchedulingBlocked(account, time.Time{}, "quota_exhausted")
+	if err := s.accountRepo.SetRateLimited(ctx, account.ID, time.Time{}); err != nil {
+		slog.Warn("account_set_quota_exhausted_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	slog.Warn("account_quota_exhausted", "account_id", account.ID)
+}
+
+func isQuotaExhaustionUpstreamError(account *Account, statusCode int, responseBody []byte) bool {
+	if account == nil {
+		return false
+	}
+	if statusCode == http.StatusPaymentRequired {
+		return account.Platform != PlatformOpenAI || gjson.GetBytes(responseBody, "detail.code").String() != "deactivated_workspace"
+	}
+	if statusCode != http.StatusBadRequest || account.Platform != PlatformAnthropic {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(responseBody)))
+	return strings.Contains(message, "credit balance")
 }
 
 func buildForbiddenErrorMessage(prefix string, upstreamMsg string, responseBody []byte, fallback string) string {

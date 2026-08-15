@@ -71,6 +71,7 @@ func TestListSchedulableAccountLoadsUsesSingleProjectionQuery(t *testing.T) {
 		"expires_at",
 		"auto_pause_on_expired",
 		"overload_until",
+		"rate_limited_at",
 		"rate_limit_reset_at",
 		"deleted_at",
 	} {

@@ -188,7 +188,7 @@ func (a *Account) IsSchedulable() bool {
 	if a.OverloadUntil != nil && now.Before(*a.OverloadUntil) {
 		return false
 	}
-	if a.RateLimitResetAt != nil && now.Before(*a.RateLimitResetAt) {
+	if a.IsRateLimited() {
 		return false
 	}
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
@@ -227,6 +227,15 @@ func (a *Account) IsCredentialUsableForShadow() bool {
 }
 
 func (a *Account) IsRateLimited() bool {
+	if a == nil {
+		return false
+	}
+	// A populated observation with no reset boundary is a quota-exhaustion
+	// block. It remains active until an authoritative or connectivity probe
+	// proves that quota is available again.
+	if a.RateLimitedAt != nil && a.RateLimitResetAt == nil {
+		return true
+	}
 	if a.RateLimitResetAt == nil {
 		return false
 	}

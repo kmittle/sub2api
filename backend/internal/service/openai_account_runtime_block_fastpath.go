@@ -89,10 +89,11 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	if s.rateLimitService == nil {
 		return false
 	}
+	quotaExhausted := isQuotaExhaustionUpstreamError(account, statusCode, responseBody)
 	shouldDisable := s.rateLimitService.HandleUpstreamError(stateCtx, account, statusCode, headers, responseBody)
 	modelTempMatched := statusCode != http.StatusUnauthorized && tempUnschedulableModel(stateCtx, nil) != "" &&
 		len(matchTempUnschedulableRules(account, statusCode, responseBody)) > 0
-	if shouldDisable && !modelTempMatched {
+	if shouldDisable && !modelTempMatched && !quotaExhausted {
 		s.BlockAccountScheduling(account, time.Time{}, "upstream_disable")
 	}
 	// Pool-mode retryable upstream errors are already bounded by the request-local
@@ -260,14 +261,14 @@ func (s *OpenAIGatewayService) ClearQuotaRecoveryRuntimeBlock(
 	expected QuotaRecoveryRuntimeBlockSnapshot,
 	clearGlobalRateLimit bool,
 	clearThresholdBlock bool,
-	clearQuotaError bool,
+	clearQuotaExhaustion bool,
 ) bool {
 	if s == nil || accountID <= 0 || expected.Generation == 0 || expected.Until.IsZero() {
 		return false
 	}
 	reasonAllowed := (clearGlobalRateLimit && (expected.Reason == "429" || expected.Reason == "429_fallback")) ||
 		(clearThresholdBlock && expected.Reason == "account_scheduling_threshold") ||
-		(clearQuotaError && (expected.Reason == "auth_error" || expected.Reason == "upstream_disable"))
+		(clearQuotaExhaustion && expected.Reason == "quota_exhausted")
 	if !reasonAllowed {
 		return false
 	}

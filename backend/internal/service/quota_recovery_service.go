@@ -58,6 +58,9 @@ type QuotaRecoveryMutation struct {
 	ExpectedRateLimitedAt    *time.Time
 	ExpectedRateLimitResetAt *time.Time
 
+	ClearQuotaExhaustion     bool
+	ExpectedQuotaExhaustedAt *time.Time
+
 	ClearThresholdBlock bool
 	ExpectedTempUntil   *time.Time
 	ExpectedTempReason  string
@@ -65,15 +68,15 @@ type QuotaRecoveryMutation struct {
 	ClearModelRateLimitKeys []string
 	ExpectedModelRateLimits map[string]any
 
-	// ClearQuotaError recovers only the fixed balance-exhaustion errors written
-	// by RateLimitService. Those errors use SetError, which changes both status
-	// and the manual schedulable column, so clearing ordinary rate-limit fields
-	// alone cannot make the account usable again.
+	// ClearQuotaError is a compatibility path for fixed balance errors written
+	// by older RateLimitService versions. It restores status/error_message but
+	// deliberately preserves the current administrator-owned schedulable value.
 	ClearQuotaError bool
 }
 
 func (m QuotaRecoveryMutation) clearsSchedulingBlock() bool {
-	return m.ClearGlobalRateLimit || m.ClearThresholdBlock || len(m.ClearModelRateLimitKeys) > 0 || m.ClearQuotaError
+	return m.ClearGlobalRateLimit || m.ClearQuotaExhaustion || m.ClearThresholdBlock ||
+		len(m.ClearModelRateLimitKeys) > 0 || m.ClearQuotaError
 }
 
 // QuotaRecoveryRepository is deliberately narrower than AccountRepository so
@@ -112,7 +115,7 @@ type QuotaRecoveryRuntimeBlocker interface {
 		expected QuotaRecoveryRuntimeBlockSnapshot,
 		clearGlobalRateLimit bool,
 		clearThresholdBlock bool,
-		clearQuotaError bool,
+		clearQuotaExhaustion bool,
 	) bool
 }
 
@@ -622,6 +625,7 @@ func (s *QuotaRecoveryService) refreshAntigravity(ctx context.Context, account *
 	mutation := newQuotaRecoveryMutation(account, account, updates, nil)
 	if authoritativeAntigravityAvailable(account, fetched.UsageInfo) {
 		addObservedGlobalRateLimit(&mutation, account)
+		addObservedQuotaExhaustion(&mutation, account)
 		addObservedQuotaError(&mutation, account)
 	}
 	addRecoverableAntigravityModelLimits(&mutation, account, fetched.UsageInfo)
@@ -736,9 +740,10 @@ func (s *QuotaRecoveryService) refreshGrok(ctx context.Context, account *Account
 	}
 
 	hadGlobal := account.RateLimitedAt != nil && account.RateLimitResetAt != nil
+	hadQuotaExhaustion := hasQuotaExhaustionBlock(account)
 	hadThreshold := account.TempUnschedulableUntil != nil && IsAccountSchedulingThresholdReason(account.TempUnschedulableReason)
 	hadQuotaError := hasQuotaRecoveryBalanceError(account)
-	if (!account.Schedulable && !hadQuotaError) || (!hadGlobal && !hadThreshold && !hadQuotaError) {
+	if !hadGlobal && !hadQuotaExhaustion && !hadThreshold && !hadQuotaError {
 		return result
 	}
 	result.probes++
@@ -767,6 +772,9 @@ func (s *QuotaRecoveryService) refreshGrok(ctx context.Context, account *Account
 	mutation := newQuotaRecoveryMutation(account, account, updates, nil)
 	if hadGlobal && sameObservedGlobalRateLimit(account, latest) {
 		addObservedGlobalRateLimit(&mutation, account)
+	}
+	if hadQuotaExhaustion && sameObservedQuotaExhaustion(account, latest) {
+		addObservedQuotaExhaustion(&mutation, account)
 	}
 	refreshed := refreshedQuotaRecoveryAccount(latest, updates, nil)
 	if hadThreshold && sameObservedThresholdBlock(account, latest) && refreshed != nil &&
@@ -812,6 +820,7 @@ func (s *QuotaRecoveryService) refreshConnectivity(ctx context.Context, account 
 	}
 	mutation := newQuotaRecoveryMutation(account, account, nil, nil)
 	addObservedGlobalRateLimit(&mutation, account)
+	addObservedQuotaExhaustion(&mutation, account)
 	addObservedThresholdBlock(&mutation, account)
 	addObservedQuotaError(&mutation, account)
 	applied := s.applyMutation(ctx, mutation)
@@ -838,7 +847,7 @@ func (s *QuotaRecoveryService) applyMutation(ctx context.Context, mutation Quota
 	if mutation.ClearThresholdBlock {
 		s.clearObservedTempUnschedCache(ctx, mutation)
 	}
-	if mutation.ClearGlobalRateLimit || mutation.ClearThresholdBlock || mutation.ClearQuotaError {
+	if mutation.ClearGlobalRateLimit || mutation.ClearQuotaExhaustion || mutation.ClearThresholdBlock {
 		s.clearObservedRuntimeBlock(ctx, mutation)
 	}
 	return result
@@ -884,7 +893,7 @@ func (s *QuotaRecoveryService) clearObservedRuntimeBlock(ctx context.Context, mu
 		observed.snapshot,
 		mutation.ClearGlobalRateLimit,
 		mutation.ClearThresholdBlock,
-		mutation.ClearQuotaError,
+		mutation.ClearQuotaExhaustion,
 	)
 }
 
@@ -918,6 +927,7 @@ func addObservedAccountBlocks(mutation *QuotaRecoveryMutation, observed, refresh
 	if mutation == nil || !quotaRecoveryCanClearObservedBlocks(observed) {
 		return
 	}
+	addObservedQuotaExhaustion(mutation, observed)
 	addObservedGlobalRateLimit(mutation, observed)
 	if observed.TempUnschedulableUntil == nil || !IsAccountSchedulingThresholdReason(observed.TempUnschedulableReason) {
 		return
@@ -935,6 +945,14 @@ func addObservedGlobalRateLimit(mutation *QuotaRecoveryMutation, account *Accoun
 	mutation.ClearGlobalRateLimit = true
 	mutation.ExpectedRateLimitedAt = cloneTimePtr(account.RateLimitedAt)
 	mutation.ExpectedRateLimitResetAt = cloneTimePtr(account.RateLimitResetAt)
+}
+
+func addObservedQuotaExhaustion(mutation *QuotaRecoveryMutation, account *Account) {
+	if mutation == nil || !hasQuotaExhaustionBlock(account) {
+		return
+	}
+	mutation.ClearQuotaExhaustion = true
+	mutation.ExpectedQuotaExhaustedAt = cloneTimePtr(account.RateLimitedAt)
 }
 
 func addObservedThresholdBlock(mutation *QuotaRecoveryMutation, account *Account) {
@@ -988,8 +1006,8 @@ func modelRateLimitReason(raw any) string {
 }
 
 func hasQuotaDerivedAccountBlock(account *Account) bool {
-	return account != nil && account.Schedulable &&
-		((account.RateLimitedAt != nil && account.RateLimitResetAt != nil) ||
+	return account != nil &&
+		(account.RateLimitedAt != nil ||
 			(account.TempUnschedulableUntil != nil && IsAccountSchedulingThresholdReason(account.TempUnschedulableReason)))
 }
 
@@ -998,9 +1016,9 @@ const (
 	QuotaRecoveryPaymentErrorPrefix       = "Payment required (402):"
 )
 
-// IsQuotaRecoveryBalanceErrorMessage identifies only the two balance failures
-// that RateLimitService persists with SetError. Authentication, entitlement,
-// operator and generic custom errors must never be automatically re-enabled.
+// IsQuotaRecoveryBalanceErrorMessage identifies only balance failures written
+// by older RateLimitService versions. Authentication, entitlement, operator
+// and generic custom errors must never be automatically cleared.
 func IsQuotaRecoveryBalanceErrorMessage(message string) bool {
 	message = strings.TrimSpace(message)
 	return strings.HasPrefix(message, QuotaRecoveryCreditBalanceErrorPrefix) ||
@@ -1008,12 +1026,16 @@ func IsQuotaRecoveryBalanceErrorMessage(message string) bool {
 }
 
 func hasQuotaRecoveryBalanceError(account *Account) bool {
-	return account != nil && account.Status == StatusError && !account.Schedulable &&
+	return account != nil && account.Status == StatusError &&
 		IsQuotaRecoveryBalanceErrorMessage(account.ErrorMessage)
 }
 
+func hasQuotaExhaustionBlock(account *Account) bool {
+	return account != nil && account.Status == StatusActive && account.RateLimitedAt != nil && account.RateLimitResetAt == nil
+}
+
 func quotaRecoveryCanClearObservedBlocks(account *Account) bool {
-	return account != nil && (account.Schedulable || hasQuotaRecoveryBalanceError(account))
+	return account != nil && (account.Status == StatusActive || hasQuotaRecoveryBalanceError(account))
 }
 
 func hasSameQuotaRecoveryBalanceError(expected, current *Account) bool {
@@ -1025,7 +1047,7 @@ func quotaRecoveryIdentityAllowsRestore(target, identity *Account) bool {
 	if target == nil || identity == nil {
 		return false
 	}
-	if identity.Status == StatusActive && identity.Schedulable {
+	if identity.Status == StatusActive {
 		return true
 	}
 	return identity.ID == target.ID && hasQuotaRecoveryBalanceError(identity)
@@ -1035,6 +1057,11 @@ func sameObservedGlobalRateLimit(expected, current *Account) bool {
 	return expected != nil && current != nil && expected.RateLimitedAt != nil && expected.RateLimitResetAt != nil &&
 		current.RateLimitedAt != nil && current.RateLimitResetAt != nil &&
 		expected.RateLimitedAt.Equal(*current.RateLimitedAt) && expected.RateLimitResetAt.Equal(*current.RateLimitResetAt)
+}
+
+func sameObservedQuotaExhaustion(expected, current *Account) bool {
+	return hasQuotaExhaustionBlock(expected) && hasQuotaExhaustionBlock(current) &&
+		expected.RateLimitedAt.Equal(*current.RateLimitedAt)
 }
 
 func sameObservedThresholdBlock(expected, current *Account) bool {
@@ -1092,9 +1119,9 @@ func quotaRecoveryAuthoritativeProbeEligible(account *Account) bool {
 }
 
 // quotaRecoveryConnectivityProbeEligible covers accounts whose supported
-// credential type has no authoritative balance endpoint. Active accounts must
-// remain manually schedulable; the only exception is a fixed balance error
-// written by RateLimitService, which a successful inference probe may recover.
+// credential type has no authoritative balance endpoint. A successful probe
+// may clear only an observed quota-derived block; the administrator-owned
+// schedulable switch is neither an eligibility condition nor a mutation target.
 // Connectivity probes never invent a balance snapshot.
 func quotaRecoveryConnectivityProbeEligible(account *Account) bool {
 	if !quotaRecoveryAccountBaseEligible(account) ||

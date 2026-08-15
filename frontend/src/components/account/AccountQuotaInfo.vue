@@ -130,6 +130,7 @@ const tierBadgeClass = computed(() => {
 
 // 是否限流
 const isRateLimited = computed(() => {
+  if (props.account.rate_limited_at && !props.account.rate_limit_reset_at) return true
   if (!props.account.rate_limit_reset_at) return false
   const resetTime = Date.parse(props.account.rate_limit_reset_at)
   // 防护：如果日期解析失败（NaN），则认为未限流
@@ -139,6 +140,9 @@ const isRateLimited = computed(() => {
 
 // 倒计时文本
 const resetCountdown = computed(() => {
+  if (props.account.rate_limited_at && !props.account.rate_limit_reset_at) {
+    return t('admin.accounts.status.quotaRecoveryPending')
+  }
   if (!props.account.rate_limit_reset_at) return ''
   const resetTime = Date.parse(props.account.rate_limit_reset_at)
   // 防护：如果日期解析失败，显示 "-"
@@ -173,7 +177,7 @@ const isUrgent = computed(() => {
 
 // 监听限流状态，动态启动/停止定时器
 watch(
-  () => isRateLimited.value,
+  () => Boolean(props.account.rate_limit_reset_at && isRateLimited.value),
   (limited) => {
     if (limited && !timer) {
       // 进入限流状态，启动定时器
