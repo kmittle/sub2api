@@ -201,7 +201,7 @@ func ApplyOpenAIReasoningEffortPolicy(body []byte, maxEffort string, mappings []
 
 	result := body
 	changed := false
-	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+	for _, path := range []string{"reasoning.effort", "reasoning_effort", "thinking.effort"} {
 		field := gjson.GetBytes(result, path)
 		if !field.Exists() || field.Type != gjson.String {
 			continue

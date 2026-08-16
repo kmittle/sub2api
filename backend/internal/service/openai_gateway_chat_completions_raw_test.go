@@ -277,6 +277,58 @@ func TestForwardAsRawChatCompletions_PreservesMappedGPT56MaxEffort(t *testing.T)
 	require.Equal(t, "max", *result.ReasoningEffort)
 }
 
+func TestForwardAsRawChatCompletions_KimiWildcardAndGroupEffortMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mappings := []ReasoningEffortMapping{
+		{From: "minimal", To: "low"},
+		{From: "low", To: "low"},
+		{From: "medium", To: "low"},
+		{From: "high", To: "low"},
+		{From: "xhigh", To: "high"},
+		{From: "max", To: "max"},
+	}
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "high", want: "low"},
+		{input: "xhigh", want: "high"},
+		{input: "max", want: "max"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			body := []byte(`{"model":"foreign-model","messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","effort":"` + tt.input + `"},"stream":false}`)
+			body, _ = ApplyOpenAIReasoningEffortPolicy(body, "", mappings)
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"chatcmpl_kimi","object":"chat.completion","model":"k3","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+				)),
+			}}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+			account := rawChatCompletionsTestAccount()
+			account.Credentials["model_mapping"] = map[string]any{"*": "k3"}
+
+			result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "k3", gjson.GetBytes(upstream.lastBody, "model").String())
+			require.Equal(t, tt.want, gjson.GetBytes(upstream.lastBody, "thinking.effort").String())
+			require.NotNil(t, result.ReasoningEffort)
+			require.Equal(t, tt.want, *result.ReasoningEffort)
+		})
+	}
+}
+
 func TestForwardAsRawChatCompletions_NonStreamingCapturesCacheWriteUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

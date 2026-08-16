@@ -43,11 +43,12 @@ func TestMapKimiAnthropicEffortPreservesClaudeOrder(t *testing.T) {
 }
 
 func TestNormalizeKimiReasoningEffortBody(t *testing.T) {
-	body := []byte(`{"reasoning":{"effort":"max"},"reasoning_effort":"medium"}`)
+	body := []byte(`{"reasoning":{"effort":"max"},"reasoning_effort":"medium","thinking":{"type":"enabled","effort":"high"}}`)
 	got, changed := normalizeKimiOpenAIReasoningEffortBody(body, "kimi-k3", "gpt-5.6-sol")
 	require.True(t, changed)
 	require.Equal(t, "max", gjson.GetBytes(got, "reasoning.effort").String())
 	require.Equal(t, "low", gjson.GetBytes(got, "reasoning_effort").String())
+	require.Equal(t, "high", gjson.GetBytes(got, "thinking.effort").String())
 
 	native := extractKimiNativeReasoningEffortFromBody(got)
 	require.NotNil(t, native)
@@ -61,6 +62,29 @@ func TestNormalizeKimiReasoningEffortBody(t *testing.T) {
 	unchanged, changed := normalizeKimiOpenAIReasoningEffortBody(body, "gpt-5.6-sol", "gpt-5.6-sol")
 	require.False(t, changed)
 	require.Equal(t, body, unchanged)
+}
+
+func TestNormalizeKimiReasoningEffortBodyTreatsThinkingAsNative(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "native high survives foreign model mapping", in: "high", want: "high"},
+		{name: "openai alias becomes native high", in: "xhigh", want: "high"},
+		{name: "weak alias becomes native low", in: "medium", want: "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"foreign-model","thinking":{"type":"enabled","effort":"` + tt.in + `"}}`)
+			got, _ := normalizeKimiOpenAIReasoningEffortBody(body, "k3", "foreign-model")
+			require.Equal(t, tt.want, gjson.GetBytes(got, "thinking.effort").String())
+
+			native := extractKimiNativeReasoningEffortFromBody(got)
+			require.NotNil(t, native)
+			require.Equal(t, tt.want, *native)
+		})
+	}
 }
 
 func TestIsKimiModel(t *testing.T) {

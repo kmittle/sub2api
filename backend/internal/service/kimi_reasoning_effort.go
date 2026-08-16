@@ -115,12 +115,18 @@ func normalizeKimiOpenAIReasoningEffortBody(body []byte, model, sourceModel stri
 	}
 	result := body
 	changed := false
-	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+	for _, path := range []string{"reasoning.effort", "reasoning_effort", "thinking.effort"} {
 		field := gjson.GetBytes(result, path)
 		if !field.Exists() || field.Type != gjson.String {
 			continue
 		}
-		mapped := mapKimiOpenAIReasoningEffortForModel(field.String(), sourceModel)
+		effortModel := sourceModel
+		if path == "thinking.effort" {
+			// thinking.effort is Kimi's native wire format. Treat policy output
+			// as native even when an account wildcard mapped a foreign model to K3.
+			effortModel = model
+		}
+		mapped := mapKimiOpenAIReasoningEffortForModel(field.String(), effortModel)
 		if mapped == "" || mapped == field.String() {
 			continue
 		}
@@ -139,7 +145,7 @@ func normalizeKimiOpenAIReasoningEffortBody(body []byte, model, sourceModel stri
 // OpenAI normalizer: Kimi's native `max` must remain `max` for billing and
 // usage metadata rather than being recorded as OpenAI's legacy `xhigh`.
 func extractKimiNativeReasoningEffortFromBody(body []byte) *string {
-	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+	for _, path := range []string{"reasoning.effort", "reasoning_effort", "thinking.effort"} {
 		field := gjson.GetBytes(body, path)
 		if !field.Exists() || field.Type != gjson.String {
 			continue
