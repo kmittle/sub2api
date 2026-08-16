@@ -4,6 +4,8 @@
 
 本次功能代码提交：`4202cc31b87d867753b21601c54265f457eed060`
 
+UTC 边界修复提交：`5e2373a7d73812ec251058dcd69fd72a831ec8d5`
+
 已合并并推送分支：`main`
 
 ## 最终语义
@@ -37,6 +39,17 @@
 - Anthropic OAuth、OpenAI OAuth、Antigravity OAuth、Grok OAuth 使用现有原生额度接口并刷新已有 UI 快照字段。
 - API Key、Setup Token、Bedrock、Vertex Service Account、Gemini 和 Upstream 等没有原生额度接口的凭据只执行只读连通性探测。
 - 服务已接入 Wire 启停生命周期；成功周期记录 `quota_recovery_cycle_completed`。
+
+### UTC 四小时边界
+
+提交 `5e2373a7d73812ec251058dcd69fd72a831ec8d5` 修复了一个极窄的跨槽位窗口：
+若旧循环在 UTC `03:59:59` 开始并于 `04:00:01` 结束，旧实现会直接等待
+`08:00`，从而漏掉 `04:00` 槽位。
+
+运行循环现在同时记录周期开始和结束时间。如果结束时已经进入新的 UTC 四小时槽位，
+循环会立即再调用一次 `RunOnce` 认领新槽位；持久化槽位 CAS 仍负责多实例去重，
+因此不会重复执行已认领槽位。同一槽位内的失败仍按 5 分钟重试，成功仍等待下一个
+UTC 边界。
 
 ### 额度阻断状态
 
@@ -165,6 +178,23 @@ vite build：通过
 
 此外已执行定向 service/repository 单元测试、真实 PostgreSQL quota recovery 集成测试、前端额度状态定向 Vitest、`gofmt` 和 `git diff --check`。
 
+UTC 边界修复追加执行：
+
+```bash
+/usr/local/bin/go test -tags=unit -p=1 ./... -count=1
+sudo -u bycao -g docker -- /usr/local/bin/go test -tags=integration -p=1 ./... -count=1
+/usr/local/bin/go test -race -tags=unit -p=1 ./internal/service \
+  -run 'TestQuotaRecoveryRunLoopWait|TestQuotaRecoveryStartStop|TestQuotaRecoveryRunOnce|TestQuotaRecovery.*Manual|TestQuotaRecovery.*CAS' \
+  -count=1
+/home/bycao/.cache/go-build/4c/4c3c833ad3d8a1c2af3a8dc66050f8714f999d5a9e7f5699ad081a5196365b16-d/golangci-lint \
+  run --concurrency=1 ./...  # v2.9.0, 0 issues
+/usr/local/bin/go build -p=1 ./cmd/server
+git diff --check
+```
+
+相关集成测试通过真实 `repo.SetSchedulable` 覆盖管理员在探测期间从开启改为关闭、
+以及从关闭改为开启的两个方向；额度 mutation 均保留管理员最后写入的值。
+
 ## 重点审阅项
 
 - 全仓搜索额度恢复 SQL，不应存在写入 `schedulable` 的语句。
@@ -182,7 +212,7 @@ vite build：通过
 
 当时的 Compose 五层叠加、分组、模型映射、effort 映射和代理拓扑均未改动；旧运行镜像 `local/sub2api:claude-idle-20260814-r2` 曾保留作回滚。最终修复必须使用重新构建的镜像，不能只重启这个缺陷镜像。
 
-## 最终部署记录
+## 首次最终语义部署记录
 
 2026-08-16 已在开发服务器构建并部署澄清后实现：
 
@@ -202,6 +232,30 @@ embedded_commit=4202cc31b
 - 容器内直连和公网健康检查均返回 `{"status":"ok"}`；所有六个服务 healthy，近期日志没有 quota recovery failure、panic、fatal、ERROR 或 FATAL。
 - 部署后可用内存约 2649 MiB、Swap 使用约 132 MiB、memory PSI 10/60/300 秒均为 `0.00`；`sub2api` 内存约 88 MiB。
 - 缺陷镜像 `local/sub2api:quota-recovery-20260815-f480d02c9` 和旧稳定镜像 `local/sub2api:claude-idle-20260814-r2` 均保留，仅用于回滚，不得用于本功能验收。
+- 镜像 `local/sub2api:quota-recovery-20260816-4202cc31b` 符合人工调度开关语义，但尚未包含后续 UTC 跨槽位修复，因此只作为次级回滚版本，不再是最新验收镜像。
+
+## UTC 边界修复部署记录
+
+2026-08-16 已在开发服务器构建并部署跨槽位修复：
+
+```text
+image=local/sub2api:quota-recovery-20260816-5e2373a7d
+image_id=sha256:f63372d12d20300258c36dcf6c68b59db22d18e4765c23556ce714b8df9fb5e1
+archive_sha256=60c83e416e74373bd2732ee929c7196609c2452812b9f1ffb1671e84b0efddf7
+binary_sha256=83f0dca153eca0a64ddcb5840fdb389bfa7aeafbb79593e4620d3bfffd4ce011
+embedded_version=quota-recovery-20260816
+embedded_commit=5e2373a7d
+```
+
+- Docker Hub 元数据直连超时后，没有修改 Docker daemon 或系统代理。当前提交相对上一部署没有前端、法律文档、运行时资源、entrypoint 或 Dockerfile 变化，因此在开发服务器使用已有的完整前端产物，以 Go 1.26.5 重新构建静态 embed 二进制，并在上一版已验证运行时镜像上只替换 `/app/sub2api`。新旧镜像的完整 Docker Config 哈希一致。
+- 中转站只执行归档校验、`docker load` 和单独重建 `sub2api`，没有执行 Go、Node 或 Docker build；仓库快进到 `main@5e2373a7d7381`。
+- Compose 仍按原五层顺序展开。Caddy、Kimi relay、Mihomo、PostgreSQL 和 Redis 的 Compose service hash 及容器启动时间完全不变，只有 `sub2api` 因镜像标签变化而改变。
+- 部署前后，分组完整配置、账号分组关系、账号/频道模型映射、分组 effort 策略、credentials、代理和所有人工 `schedulable` 值的数据库哈希逐项一致。
+- 部署时当前槽位仍是 `2026-08-16T00:00:00Z`，没有删除槽位或强制重复真实探测，也没有消耗 Kimi API。三个 OpenAI OAuth 账号均保留原生 5h/7d 额度快照。
+- 新容器随后在自然对齐的 `2026-08-16T04:00:00Z` 槽位完成生产巡检：`accounts_scanned=3`、`probes_attempted=3`、`snapshots_saved=3`、`blocks_cleared=0`、`errors=0`。三个 OpenAI OAuth 快照均刷新；其中 7 天额度仍为 100% 的账号继续保留原有限期 429，另外两个账号继续无阻断。巡检后的人工 `schedulable`、分组、映射、effort、credentials 和代理哈希仍与部署前相同，quota recovery outbox 已正常消费。
+- 容器内健康检查和中转站本机 Caddy `/health` 均返回 `{"status":"ok"}`；六个服务全部 healthy 且重启计数为 0。部署后持续有 `/v1/responses` 和 `/v1/messages` 请求返回 200，近期日志没有 quota recovery failure、panic 或 fatal。
+- 开发服务器直接访问中转站公网 IP 的健康请求受网络 ACL 影响超时，因此没有把该路径记作通过；线上实际流量与中转站本机 Caddy 检查用于确认公开转发链路仍在工作。
+- 部署后可用内存约 2.5 GiB、Swap 使用约 134 MiB，memory PSI 10/60/300 秒均为 `0.00`；`sub2api` 内存约 75 MiB。
 
 ## 部署边界
 
