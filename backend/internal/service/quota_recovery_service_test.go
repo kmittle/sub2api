@@ -231,6 +231,22 @@ func TestQuotaRecoveryRunLoopWaitAlignsToUTCFourHourSlots(t *testing.T) {
 	require.Equal(t, quotaRecoveryInterval, quotaRecoveryRunLoopWait(exactBoundary, nil))
 }
 
+func TestQuotaRecoveryRunLoopWaitImmediatelyClaimsBoundaryCrossedDuringCycle(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 8, 14, 3, 59, 59, 0, time.UTC)
+	finishedAt := time.Date(2026, 8, 14, 4, 0, 1, 0, time.UTC)
+	require.Zero(t, quotaRecoveryRunLoopWaitAfterCycle(startedAt, finishedAt, nil))
+	require.Zero(t, quotaRecoveryRunLoopWaitAfterCycle(startedAt, finishedAt, errors.New("old slot failed")))
+
+	sameSlotStarted := time.Date(2026, 8, 14, 1, 0, 0, 0, time.UTC)
+	sameSlotFinished := time.Date(2026, 8, 14, 1, 30, 0, 0, time.UTC)
+	require.Equal(t, 2*time.Hour+30*time.Minute,
+		quotaRecoveryRunLoopWaitAfterCycle(sameSlotStarted, sameSlotFinished, nil))
+	require.Equal(t, quotaRecoveryFailureRetryInterval,
+		quotaRecoveryRunLoopWaitAfterCycle(sameSlotStarted, sameSlotFinished, errors.New("scan failed")))
+}
+
 func TestQuotaRecoveryRunOnceReleasesFailedSlotWithDetachedContext(t *testing.T) {
 	t.Parallel()
 

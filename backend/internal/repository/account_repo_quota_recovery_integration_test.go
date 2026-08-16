@@ -239,8 +239,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 			},
 			Extra: map[string]any{"operator_setting": "keep"},
 		})
-		_, err := tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE WHERE id = $1", account.ID)
-		require.NoError(t, err)
+		require.NoError(t, repo.SetSchedulable(ctx, account.ID, false))
 		observed, err := repo.GetByID(ctx, account.ID)
 		require.NoError(t, err)
 		return observed
@@ -255,6 +254,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	require.NoError(t, err)
 	require.Equal(t, []int64{group.ID}, recoverable.GroupIDs)
 	originalCredentials := recoverable.Credentials
+	cacheEventsBeforeRecovery := len(cache.setAccounts)
 
 	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
 		Target: recoverable, Identity: recoverable, ClearQuotaError: true,
@@ -275,10 +275,11 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 		"SELECT priority FROM account_groups WHERE account_id = $1 AND group_id = $2",
 		[]any{recoverable.ID, group.ID}, &groupPriority))
 	require.Equal(t, 23, groupPriority)
-	require.Len(t, cache.setAccounts, 1)
-	require.Equal(t, recoverable.ID, cache.setAccounts[0].ID)
-	require.Equal(t, []int64{group.ID}, cache.setAccounts[0].GroupIDs, "the immediate scheduler refresh must carry the original groups")
-	require.Equal(t, originalCredentials, cache.setAccounts[0].Credentials)
+	require.Len(t, cache.setAccounts, cacheEventsBeforeRecovery+1)
+	refreshed := cache.setAccounts[len(cache.setAccounts)-1]
+	require.Equal(t, recoverable.ID, refreshed.ID)
+	require.Equal(t, []int64{group.ID}, refreshed.GroupIDs, "the immediate scheduler refresh must carry the original groups")
+	require.Equal(t, originalCredentials, refreshed.Credentials)
 
 	stale := createBalanceError(
 		"quota-recovery-balance-error-cas",
@@ -287,6 +288,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	newError := service.QuotaRecoveryCreditBalanceErrorPrefix + " newer generation"
 	_, err = tx.ExecContext(ctx, "UPDATE accounts SET error_message = $2, updated_at = NOW() WHERE id = $1", stale.ID, newError)
 	require.NoError(t, err)
+	cacheEventsBeforeCASMiss := len(cache.setAccounts)
 
 	applied, err = repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
 		Target: stale, Identity: stale, ClearQuotaError: true,
@@ -299,7 +301,7 @@ func TestApplyQuotaRecoveryMutationRestoresOnlyExactBalanceErrorGeneration(t *te
 	require.Equal(t, service.StatusError, got.Status)
 	require.False(t, got.Schedulable)
 	require.Equal(t, newError, got.ErrorMessage)
-	require.Len(t, cache.setAccounts, 1, "a CAS miss must not refresh the scheduler snapshot")
+	require.Len(t, cache.setAccounts, cacheEventsBeforeCASMiss, "a CAS miss must not refresh the scheduler snapshot")
 }
 
 func TestApplyQuotaRecoveryMutationClearsQuotaExhaustionWithoutLosingConcurrentManualPause(t *testing.T) {
@@ -317,8 +319,7 @@ func TestApplyQuotaRecoveryMutationClearsQuotaExhaustionWithoutLosingConcurrentM
 	observed, err := repo.GetByID(ctx, account.ID)
 	require.NoError(t, err)
 
-	_, err = tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE, updated_at = NOW() WHERE id = $1", account.ID)
-	require.NoError(t, err)
+	require.NoError(t, repo.SetSchedulable(ctx, account.ID, false))
 
 	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
 		Target: observed, Identity: observed,
@@ -356,8 +357,7 @@ func TestApplyQuotaRecoveryMutationClearsTimedRateLimitWithoutLosingConcurrentMa
 	observed, err := repo.GetByID(ctx, account.ID)
 	require.NoError(t, err)
 
-	_, err = tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE, updated_at = NOW() WHERE id = $1", account.ID)
-	require.NoError(t, err)
+	require.NoError(t, repo.SetSchedulable(ctx, account.ID, false))
 
 	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
 		Target: observed, Identity: observed,
@@ -373,6 +373,45 @@ func TestApplyQuotaRecoveryMutationClearsTimedRateLimitWithoutLosingConcurrentMa
 	require.NoError(t, err)
 	require.Equal(t, service.StatusActive, got.Status)
 	require.False(t, got.Schedulable, "a manual pause during the probe must survive the CAS update")
+	require.Nil(t, got.RateLimitedAt)
+	require.Nil(t, got.RateLimitResetAt)
+	require.Equal(t, "keep", got.Extra["operator_setting"])
+	require.Equal(t, observed.Credentials, got.Credentials, "model mapping and credential identity must remain byte-equivalent")
+}
+
+func TestApplyQuotaRecoveryMutationClearsQuotaExhaustionWithoutLosingConcurrentManualResume(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+	limitedAt := time.Now().UTC().Truncate(time.Microsecond)
+	account := mustCreateAccount(t, tx.Client(), &service.Account{
+		Name: "quota-recovery-manual-resume", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, Schedulable: true,
+		Credentials:   map[string]any{"api_key": "test-key", "model_mapping": map[string]any{"gpt-test": "upstream-test"}},
+		Extra:         map[string]any{"operator_setting": "keep"},
+		RateLimitedAt: &limitedAt,
+	})
+	require.NoError(t, repo.SetSchedulable(ctx, account.ID, false))
+
+	observed, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.False(t, observed.Schedulable)
+
+	require.NoError(t, repo.SetSchedulable(ctx, account.ID, true))
+
+	applied, err := repo.ApplyQuotaRecoveryMutation(ctx, service.QuotaRecoveryMutation{
+		Target: observed, Identity: observed,
+		ClearQuotaExhaustion:     true,
+		ExpectedQuotaExhaustedAt: observed.RateLimitedAt,
+		ExtraUpdates:             map[string]any{"quota_recovery_snapshot": map[string]any{"available": true}},
+	})
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	got, err := repo.GetByID(ctx, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusActive, got.Status)
+	require.True(t, got.Schedulable, "a manual resume during the probe must survive the CAS update")
 	require.Nil(t, got.RateLimitedAt)
 	require.Nil(t, got.RateLimitResetAt)
 	require.Equal(t, "keep", got.Extra["operator_setting"])
@@ -397,8 +436,7 @@ func TestListQuotaRecoveryAccountPageIncludesBalanceAndConnectivityCandidates(t 
 		}
 		created := mustCreateAccount(t, tx.Client(), account)
 		if !schedulable {
-			_, err := tx.ExecContext(ctx, "UPDATE accounts SET schedulable = FALSE WHERE id = $1", created.ID)
-			require.NoError(t, err)
+			require.NoError(t, repo.SetSchedulable(ctx, created.ID, false))
 			created.Schedulable = false
 		}
 		return created

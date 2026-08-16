@@ -253,11 +253,12 @@ func (s *QuotaRecoveryService) Stop() {
 func (s *QuotaRecoveryService) runLoop() {
 	defer s.wg.Done()
 	for {
+		cycleStartedAt := time.Now()
 		err := s.RunOnce(s.ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("quota_recovery_cycle_failed", "error", err)
 		}
-		timer := time.NewTimer(quotaRecoveryRunLoopWait(time.Now(), err))
+		timer := time.NewTimer(quotaRecoveryRunLoopWaitAfterCycle(cycleStartedAt, time.Now(), err))
 		select {
 		case <-s.ctx.Done():
 			if !timer.Stop() {
@@ -267,6 +268,15 @@ func (s *QuotaRecoveryService) runLoop() {
 		case <-timer.C:
 		}
 	}
+}
+
+func quotaRecoveryRunLoopWaitAfterCycle(startedAt, now time.Time, cycleErr error) time.Duration {
+	startedSlot := startedAt.UTC().Truncate(quotaRecoveryInterval)
+	currentSlot := now.UTC().Truncate(quotaRecoveryInterval)
+	if currentSlot.After(startedSlot) {
+		return 0
+	}
+	return quotaRecoveryRunLoopWait(now, cycleErr)
 }
 
 func quotaRecoveryRunLoopWait(now time.Time, cycleErr error) time.Duration {
