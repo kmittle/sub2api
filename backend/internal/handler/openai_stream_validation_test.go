@@ -85,7 +85,7 @@ func TestOpenAICompatibleHandlersRejectInvalidStreamFieldType(t *testing.T) {
 	}
 }
 
-func TestGatewayOpenAICompatibleHandlersAllowBooleanStreamToContinue(t *testing.T) {
+func TestOpenAICompatibleHandlersRejectClaudeCodeOnlyGroups(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -110,6 +110,22 @@ func TestGatewayOpenAICompatibleHandlersAllowBooleanStreamToContinue(t *testing.
 				(&GatewayHandler{gatewayService: &service.GatewayService{}}).ChatCompletions(c)
 			},
 		},
+		{
+			name: "openai_responses_false",
+			path: "/v1/responses",
+			body: `{"model":"gpt-5","stream":false,"input":"hello"}`,
+			run: func(c *gin.Context) {
+				(&OpenAIGatewayHandler{}).Responses(c)
+			},
+		},
+		{
+			name: "openai_chat_completions_true",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hello"}]}`,
+			run: func(c *gin.Context) {
+				(&OpenAIGatewayHandler{}).ChatCompletions(c)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -122,6 +138,20 @@ func TestGatewayOpenAICompatibleHandlersAllowBooleanStreamToContinue(t *testing.
 			require.Contains(t, rec.Body.String(), "This group is restricted to Claude Code clients")
 		})
 	}
+}
+
+func TestOpenAIResponsesWebSocketRejectsClaudeCodeOnlyGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c, rec := newOpenAICompatibleStreamValidationContext("/v1/responses", "", true)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request.Header.Set("Upgrade", "websocket")
+	c.Request.Header.Set("Connection", "Upgrade")
+
+	(&OpenAIGatewayHandler{}).ResponsesWebSocket(c)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "This group is restricted to Claude Code clients")
 }
 
 func newOpenAICompatibleStreamValidationContext(path, body string, claudeCodeOnly bool) (*gin.Context, *httptest.ResponseRecorder) {

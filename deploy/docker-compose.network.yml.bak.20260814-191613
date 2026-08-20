@@ -13,44 +13,27 @@ services:
     pids_limit: 128
     stop_grace_period: 15s
     volumes:
-      - type: bind
-        source: ./mihomo-docker-entrypoint.sh
-        target: /opt/mihomo/mihomo-docker-entrypoint.sh
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${MIHOMO_BINARY_PATH:-../web-router/clash}
-        target: /opt/mihomo/clash
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${MIHOMO_CONFIG_PATH:-../web-router/tigr.yaml}
-        target: /opt/mihomo-source/tigr.yaml
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${MIHOMO_GEOIP_PATH:-../web-router/geoip.metadb}
-        target: /opt/mihomo-source/geoip.metadb
-        read_only: true
-        bind:
-          create_host_path: false
+      - ./mihomo-docker-entrypoint.sh:/opt/mihomo/mihomo-docker-entrypoint.sh:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/clash:/opt/mihomo/clash:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/tigr.yaml:/opt/mihomo-source/tigr.yaml:ro
+      - /home/ubuntu/.bash_custom/vpn/vpn-tools/geoip.metadb:/opt/mihomo-source/geoip.metadb:ro
     tmpfs:
       - /run/mihomo:rw,noexec,nosuid,nodev,mode=0700,uid=1000,gid=1001
     healthcheck:
       test:
-        - CMD-SHELL
-        - >-
-          wget -q -T 3 -O /dev/null http://127.0.0.1:19090/version &&
-          nc -z -w 2 172.30.0.2 17890 &&
-          nc -z -w 2 127.0.0.1 17891
+        - CMD
+        - wget
+        - -q
+        - -T
+        - "3"
+        - -O
+        - /dev/null
+        - http://127.0.0.1:19090/version
       interval: 10s
       timeout: 4s
       retries: 6
       start_period: 10s
-    networks: !override
+    networks:
       sub2api-proxy:
         interface_name: eth0
         ipv4_address: 172.30.0.2

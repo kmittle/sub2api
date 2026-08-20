@@ -149,5 +149,9 @@ frontend/coverage/
 aicodex
 output/
 
+# Deployment-local routing assets contain proxy credentials and binaries.
+/web-router/*
+!/web-router/README.md
+
 # Vitest / Vite cache at repo root
 .vite/

@@ -193,6 +193,15 @@ func allowOpenAICompatibleMessagesDispatch(apiKey *service.APIKey) bool {
 	return apiKey.Group.AllowMessagesDispatch
 }
 
+func (h *OpenAIGatewayHandler) rejectClaudeCodeOnlyOpenAIEndpoint(c *gin.Context, apiKey *service.APIKey) bool {
+	if apiKey == nil || apiKey.Group == nil || !apiKey.Group.ClaudeCodeOnly {
+		return false
+	}
+	h.errorResponse(c, http.StatusForbidden, "permission_error",
+		"This group is restricted to Claude Code clients (/v1/messages only)")
+	return true
+}
+
 func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, model string) bool {
 	return compositeTargetPlatformAllowed(c, apiKey, model, service.PlatformOpenAI, service.PlatformGrok)
 }
@@ -248,6 +257,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
 		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	if h.rejectClaudeCodeOnlyOpenAIEndpoint(c, apiKey) {
 		return
 	}
 
@@ -1607,6 +1619,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
 		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	if h.rejectClaudeCodeOnlyOpenAIEndpoint(c, apiKey) {
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)

@@ -352,10 +352,11 @@ services:
     # 注意：不暴露端口到宿主机，应用通过内部网络连接
     # 如需调试，可临时添加：ports: ["127.0.0.1:6379:6379"]
 
-  # Dedicated Mihomo instance for Sub2API. It reuses the host VPN's node
-  # definitions and complete rule set. Container-only high-priority rules send
-  # the domestic relay DIRECT, while official OpenAI/Codex and Anthropic/Claude
-  # endpoints use 链式代理. The fixed residential exit remains the second hop.
+  # Dedicated Mihomo instance for Sub2API. Route assets live under the
+  # repository-local web-router directory so this deployment never consumes
+  # another server's VPN configuration. Port 17890 uses the fixed US
+  # residential exit directly; port 17891 preserves the previously working
+  # direct route for KIMI API and membership traffic.
   mihomo:
     image: redis:8-alpine
     container_name: sub2api-mihomo
@@ -367,16 +368,15 @@ services:
     cap_drop:
       - ALL
     environment:
-      - MIHOMO_CHAIN_GROUP=${MIHOMO_CHAIN_GROUP:-链式代理}
       - MIHOMO_MIXED_PORT=17890
     volumes:
-      - ${MIHOMO_BINARY_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/clash}:/opt/mihomo/clash:ro
-      - ${MIHOMO_CONFIG_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/tigr.yaml}:/opt/mihomo/source.yaml:ro
-      - ${MIHOMO_GEOIP_PATH:-/home/bycao/.bash_custom/vpn/vpn-tools/geoip.metadb}:/opt/mihomo/geoip.metadb:ro
-      - ./mihomo-docker-entrypoint.sh:/usr/local/bin/sub2api-mihomo-entrypoint:ro
+      - ${MIHOMO_BINARY_PATH:-../web-router/clash}:/opt/mihomo/clash:ro
+      - ${MIHOMO_CONFIG_PATH:-../web-router/tigr.yaml}:/opt/mihomo-source/tigr.yaml:ro
+      - ${MIHOMO_GEOIP_PATH:-../web-router/geoip.metadb}:/opt/mihomo-source/geoip.metadb:ro
+      - ./mihomo-docker-entrypoint.sh:/opt/mihomo/mihomo-docker-entrypoint.sh:ro
     tmpfs:
       - /tmp:rw,nosuid,noexec,size=64m,mode=1777
-    entrypoint: ["/usr/local/bin/sub2api-mihomo-entrypoint"]
+    entrypoint: ["/bin/sh", "/opt/mihomo/mihomo-docker-entrypoint.sh"]
     networks:
       sub2api-proxy-network: {}
       mihomo-uplink-network:

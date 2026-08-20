@@ -174,7 +174,7 @@ awk '
         'log-level: info' \
         'external-controller: 127.0.0.1:19090' \
         'listeners:' \
-        '  - name: KIMI-CN' \
+        '  - name: KIMI-DIRECT' \
         '    type: mixed' \
         '    port: 17891' \
         '    listen: 0.0.0.0' \
@@ -200,6 +200,9 @@ awk '
         '  proxy-server-nameserver:' \
         '    - https://1.1.1.1/dns-query#DIRECT' \
         '  nameserver-policy:' \
+        '    "+.kimi.com": https://1.1.1.1/dns-query#DIRECT' \
+        '    "+.moonshot.cn": https://1.1.1.1/dns-query#DIRECT' \
+        '    "+.kimi.ai": https://1.1.1.1/dns-query#DIRECT' \
         '    "+.openai.com": https://1.1.1.1/dns-query#AI-US' \
         '    "+.chatgpt.com": https://1.1.1.1/dns-query#AI-US' \
         '    "+.oaistatic.com": https://1.1.1.1/dns-query#AI-US' \
@@ -218,7 +221,7 @@ awk '
         '    "+.googleusercontent.com": https://1.1.1.1/dns-query#AI-US' \
         '    "+.google.dev": https://1.1.1.1/dns-query#AI-US' \
         'proxies:'
-    awk '{ print }' "$proxy_file"
+    awk '{ sub(/^[[:space:]]*-[[:space:]]*/, "  - "); print }' "$proxy_file"
     printf '%s\n' \
         'proxy-groups:' \
         '  - name: AI-US' \
@@ -226,7 +229,9 @@ awk '
         '    proxies:' \
         '      - 固定出口-US' \
         'rules:' \
-        '  - DOMAIN-SUFFIX,ziplab.co,DIRECT' \
+        '  - DOMAIN-SUFFIX,kimi.com,DIRECT' \
+        '  - DOMAIN-SUFFIX,moonshot.cn,DIRECT' \
+        '  - DOMAIN-SUFFIX,kimi.ai,DIRECT' \
         '  - DOMAIN-SUFFIX,openai.com,AI-US' \
         '  - DOMAIN-SUFFIX,chatgpt.com,AI-US' \
         '  - DOMAIN-SUFFIX,oaistatic.com,AI-US' \
@@ -244,8 +249,8 @@ awk '
         '  - DOMAIN-SUFFIX,gstatic.com,AI-US' \
         '  - DOMAIN-SUFFIX,googleusercontent.com,AI-US' \
         '  - DOMAIN-SUFFIX,google.dev,AI-US' \
-        '  - DOMAIN-SUFFIX,cn,DIRECT' \
-        '  - GEOIP,CN,DIRECT' \
+        '  - DOMAIN-SUFFIX,x.ai,AI-US' \
+        '  - DOMAIN-SUFFIX,grok.com,AI-US' \
         '  - MATCH,AI-US'
 } > "$config_tmp"
 chmod 0600 "$config_tmp"
@@ -260,6 +265,10 @@ rm -f "$test_log"
 mv "$config_tmp" "$config_file"
 chmod 0600 "$config_file"
 rm -f "$candidate_file" "$proxy_file" "$count_file"
+
+if [ "${MIHOMO_VALIDATE_ONLY:-0}" = "1" ]; then
+    exit 0
+fi
 
 trap - EXIT HUP INT TERM
 exec "$clash_bin" -d "$runtime_dir" -f "$config_file"

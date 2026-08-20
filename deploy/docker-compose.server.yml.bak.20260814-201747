@@ -1,0 +1,360 @@
+services:
+  sub2api:
+    image: weishaw/sub2api@sha256:7a924a8ecd5ad103d7b2730a3e5f94db5d4f09bb8273f0298ac3e13380bdb3a1
+    pull_policy: never
+    ports: !override []
+    environment:
+      HTTP_PROXY: http://mihomo:17890
+      HTTPS_PROXY: http://mihomo:17890
+      ALL_PROXY: socks5h://mihomo:17890
+      NO_PROXY: 127.0.0.1,localhost,::1,sub2api,postgres,redis,mihomo,caddy
+      http_proxy: http://mihomo:17890
+      https_proxy: http://mihomo:17890
+      all_proxy: socks5h://mihomo:17890
+      no_proxy: 127.0.0.1,localhost,::1,sub2api,postgres,redis,mihomo,caddy
+      UPDATE_PROXY_URL: http://mihomo:17890
+      SECURITY_PROXY_FALLBACK_ALLOW_DIRECT_ON_ERROR: "false"
+    depends_on:
+      mihomo:
+        condition: service_healthy
+        required: true
+    networks: !override
+      sub2api-core:
+        interface_name: eth0
+      sub2api-proxy:
+        interface_name: eth1
+      sub2api-ingress:
+        interface_name: eth2
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -Y
+        - "off"
+        - -q
+        - -T
+        - "5"
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    pull_policy: never
+    security_opt:
+      - no-new-privileges:true
+    networks: !override
+      sub2api-core:
+        interface_name: eth0
+
+  redis:
+    image: redis@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+    pull_policy: never
+    security_opt:
+      - no-new-privileges:true
+    networks: !override
+      sub2api-core:
+        interface_name: eth0
+
+  caddy:
+    image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    pull_policy: never
+    container_name: sub2api-caddy
+    user: "1000:1001"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        umask 077
+        printf '%s' "$$CADDY_SERVER_CONFIG" > /etc/caddy/Caddyfile
+        chmod 0600 /etc/caddy/Caddyfile
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    environment:
+      CADDY_SERVER_CONFIG: |
+        {
+          admin off
+          default_sni 170.106.110.84
+          servers {
+            max_header_size 64KB
+            protocols h1 h2
+            timeouts {
+              read_header 10s
+              idle 2m
+            }
+          }
+        }
+
+        :8080 {
+          bind 0.0.0.0
+
+          reverse_proxy sub2api:8080 {
+            health_uri /health
+            health_interval 30s
+            health_timeout 10s
+            health_status 200
+
+            lb_policy round_robin
+            lb_try_duration 5s
+            lb_try_interval 250ms
+
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+
+            transport http {
+              keepalive 120s
+              keepalive_idle_conns 256
+              read_buffer 16KB
+              write_buffer 16KB
+              compression off
+            }
+
+          }
+
+          encode {
+            zstd
+            gzip 6
+            minimum_length 256
+            match {
+              header Content-Type text/css*
+              header Content-Type text/csv*
+              header Content-Type text/html*
+              header Content-Type text/javascript*
+              header Content-Type text/markdown*
+              header Content-Type text/plain*
+              header Content-Type text/xml*
+              header Content-Type application/json*
+              header Content-Type application/javascript*
+              header Content-Type application/xml*
+              header Content-Type application/rss+xml*
+              header Content-Type image/svg+xml*
+            }
+          }
+
+          request_body {
+            max_size 256MB
+          }
+
+          log {
+            output stdout
+            format json
+            level INFO
+          }
+
+          handle_errors {
+            respond "{err.status_code} {err.status_text}"
+          }
+        }
+
+        https://170.106.110.84 {
+          tls {
+            issuer acme {
+              dir https://acme-v02.api.letsencrypt.org/directory
+              profile shortlived
+            }
+          }
+
+          reverse_proxy sub2api:8080 {
+            health_uri /health
+            health_interval 30s
+            health_timeout 10s
+            health_status 200
+
+            lb_policy round_robin
+            lb_try_duration 5s
+            lb_try_interval 250ms
+
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+
+            transport http {
+              keepalive 120s
+              keepalive_idle_conns 256
+              read_buffer 16KB
+              write_buffer 16KB
+              compression off
+            }
+
+          }
+
+          encode {
+            zstd
+            gzip 6
+            minimum_length 256
+            match {
+              header Content-Type text/css*
+              header Content-Type text/csv*
+              header Content-Type text/html*
+              header Content-Type text/javascript*
+              header Content-Type text/markdown*
+              header Content-Type text/plain*
+              header Content-Type text/xml*
+              header Content-Type application/json*
+              header Content-Type application/javascript*
+              header Content-Type application/xml*
+              header Content-Type application/rss+xml*
+              header Content-Type image/svg+xml*
+            }
+          }
+
+          request_body {
+            max_size 256MB
+          }
+
+          log {
+            output stdout
+            format json
+            level INFO
+          }
+
+          handle_errors {
+            respond "{err.status_code} {err.status_text}"
+          }
+        }
+
+        https://kmittle.cloud {
+          reverse_proxy sub2api:8080 {
+            health_uri /health
+            health_interval 30s
+            health_timeout 10s
+            health_status 200
+
+            lb_policy round_robin
+            lb_try_duration 5s
+            lb_try_interval 250ms
+
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+
+            transport http {
+              keepalive 120s
+              keepalive_idle_conns 256
+              read_buffer 16KB
+              write_buffer 16KB
+              compression off
+            }
+
+          }
+
+          encode {
+            zstd
+            gzip 6
+            minimum_length 256
+            match {
+              header Content-Type text/css*
+              header Content-Type text/csv*
+              header Content-Type text/html*
+              header Content-Type text/javascript*
+              header Content-Type text/markdown*
+              header Content-Type text/plain*
+              header Content-Type text/xml*
+              header Content-Type application/json*
+              header Content-Type application/javascript*
+              header Content-Type application/xml*
+              header Content-Type application/rss+xml*
+              header Content-Type image/svg+xml*
+            }
+          }
+
+          request_body {
+            max_size 256MB
+          }
+
+          log {
+            output stdout
+            format json
+            level INFO
+          }
+
+          handle_errors {
+            respond "{err.status_code} {err.status_text}"
+          }
+        }
+
+        https://www.kmittle.cloud {
+          redir https://kmittle.cloud{uri} permanent
+        }
+    read_only: true
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    pids_limit: 128
+    stop_grace_period: 15s
+    ports:
+      - target: 8080
+        published: "8080"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 80
+        published: "80"
+        host_ip: 0.0.0.0
+        protocol: tcp
+      - target: 443
+        published: "443"
+        host_ip: 0.0.0.0
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ./caddy_data
+        target: /data
+        read_only: false
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /etc/caddy:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1001
+      - /config:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=1000,gid=1001
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=1000,gid=1001
+    depends_on:
+      sub2api:
+        condition: service_healthy
+        required: true
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -Y
+        - "off"
+        - -q
+        - -T
+        - "3"
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/health
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+    networks:
+      sub2api-ingress:
+        interface_name: eth0
+      caddy-uplink:
+        interface_name: eth1
+        gw_priority: 1
+
+networks:
+  sub2api-core:
+    name: sub2api-core
+    driver: bridge
+    internal: true
+  sub2api-ingress:
+    name: sub2api-ingress
+    driver: bridge
+    internal: true
+  caddy-uplink:
+    name: sub2api-caddy-uplink
+    driver: bridge
